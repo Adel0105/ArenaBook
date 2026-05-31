@@ -86,4 +86,26 @@ Za Android emulator: `http://10.0.2.2:5000`. Za desktop/Windows admin: `http://l
 
 ## Korisnički podaci za predaju
 
-Bit će u README kad seed i API budu spremni.
+Demo korisnici i podaci u bazi kreiraju se **automatski** pri startu API-ja u Dockeru ako je u `.env` postavljeno:
+
+```env
+SEED_RUN_DEMO_DATA_ON_STARTUP=true
+SEED_ADMIN_EMAIL=admin@arena.local
+SEED_USERS_PASSWORD=OvoJeSifra1!
+```
+
+(Nazive varijabli i primjer vrijednosti vidi u [`.env.example`](.env.example). Stvarni `.env` s tajnama **nije** u Git-u — za predaju ide u `.env-tajne.zip`.)
+
+Nakon `docker compose up -d --build` prijava:
+
+| Uloga | E-mail | Lozinka | Klijent |
+|-------|--------|---------|---------|
+| **Administrator** | `admin@arena.local` | `OvoJeSifra1!` | Flutter **desktop** (Windows) |
+| **Demo igrač** | `amir.hadzic@arena.local` | `OvoJeSifra1!` | Flutter **mobile** (Android) |
+| **Demo organizator** | `tarik.selimovic@arena.local` | `OvoJeSifra1!` | mobile ili desktop |
+
+Lozinka je ista za **sve** seed račune (`SEED_USERS_PASSWORD`). Ostali demo igrači slijede obrazac `ime.prezime@arena.local` (npr. `dino.basic@arena.local`, `haris.delic@arena.local`).
+
+**Baza:** u `.env` postavi `SQLSERVER_DATABASE` prema uputama FIT-a (broj indeksa bez prefiksa IB, npr. `210169`). Trenutna razvojna vrijednost može biti drugačija — važno je da odgovara imenu baze u tvom `.env` pri predaji.
+
+**Napomena:** u Development okruženju demo seed možeš ponovo pokrenuti i ručno: `POST /api/dev/seed-demo-data` (Swagger).
