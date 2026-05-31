@@ -1,72 +1,122 @@
 # ArenaBook
 
-Seminarski projekt: **backend** (.NET), **desktop** i **mobile** Flutter klijenti, **SQL Server** (Docker), RabbitMQ, worker servis.
+**ArenaBook** je seminarski sustav za rezervaciju sportskih dvorana i termina. Projekt obuhvaća **.NET Web API** i worker, **Flutter** admin klijent (Windows) i mobilnu aplikaciju (Android), te infrastrukturu u **Dockeru** (SQL Server, RabbitMQ).
 
-## Struktura repozitorija (uvijek ovako)
+**Autor:** Adel Čomor (IB210169)
 
-| Folder | Sadržaj |
-|--------|---------|
-| **`backend/`** | Sav .NET kod zajedno: Web API, Worker, `ArenaBook.sln`, Dockerfajlovi za API i Worker. |
-| **`desktop/`** | Flutter admin za Windows. |
-| **`mobile/`** | Flutter aplikacija za igrače (Android). |
-| Korijen | `docker-compose.yml`, `.env.example`, `PROJEKT_PODSJETNIK.md`, ovaj `README.md`. |
+---
+
+## Sadržaj repozitorija
+
+| Putanja | Opis |
+|---------|------|
+| [`backend/`](backend/) | .NET rješenje: Web API, Worker, migracije, poslovna logika |
+| [`desktop/`](desktop/) | Flutter admin aplikacija (Windows) |
+| [`mobile/`](mobile/) | Flutter mobilna aplikacija (Android) |
+| [`docker-compose.yml`](docker-compose.yml) | SQL Server, RabbitMQ, API i Worker |
+| [`.env.example`](.env.example) | Uzorak varijabli okruženja (bez tajni) |
+| [`.env-tajne.zip`](.env-tajne.zip) | Šifrirani `.env` za ocjenjivanje (vidi dolje) |
+| [`recommender-dokumentacija.md`](recommender-dokumentacija.md) | Dokumentacija sustava preporuke |
+
+---
 
 ## Preduvjeti
 
 - [.NET SDK 9](https://dotnet.microsoft.com/download)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (za `docker compose`)
-- [Flutter SDK](https://docs.flutter.dev/get-started/install) (za `desktop/` i kasnije `mobile/`)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [Flutter SDK](https://docs.flutter.dev/get-started/install) (za lokalni razvoj klijenata)
 
-## Konfiguracija tajni
+---
 
-Tajne **ne** idu u `appsettings.json` ni u kod. Koristi `.env` u korijenu repozitorija (nije u Git-u).
+## Brzo pokretanje (Docker)
 
-1. (Preporučeno) Kopiraj `.env.example` u `.env` i postavi svoje lozinke i `SQLSERVER_DATABASE`.
-2. **`SQLSERVER_SA_PASSWORD`** mora zadovoljiti [pravila jakosti](https://learn.microsoft.com/en-us/sql/relational-databases/security/password-policy) za SQL Server.
-3. **`SQLSERVER_DATABASE`** — ime baze (prema uputama FIT obično broj indeksa bez prefiksa IB, npr. `210169`).
-
-Ako **nemaš `.env`**, `docker-compose.yml` i dalje koristi **razvojne podrazumijevane vrijednosti** (`:-…` u fajlu) pa ne bi trebalo biti upozorenja „variable is not set”. Za predaju i stvarne tajne ipak koristi vlastiti `.env` i ne dijeli lozinke.
-
-Connection string za API u kontejneru sastavlja Compose iz istih varijabli i hosta `sqlserver`.
-
-## Docker (iz korijena repozitorija)
+1. Raspakuj `.env` iz [`.env-tajne.zip`](.env-tajne.zip) u **korijen** repozitorija (pored `docker-compose.yml`).
+2. Iz korijena repozitorija:
 
 ```powershell
 docker compose up -d --build
 ```
 
-- **API** — `http://localhost:${API_HTTP_PORT:-5000}` (npr. `/health`, **Swagger UI** na `/swagger`)
-- **SQL Server** — port iz `SQLSERVER_PORT` (default **1433** na hostu)
-- **RabbitMQ** — AMQP i management portovi iz `.env`
+3. Provjera:
+   - API: `http://localhost:5000/health`
+   - Swagger: `http://localhost:5000/swagger`
 
-Zaustavljanje:
+Zaustavljanje stacka:
 
 ```powershell
 docker compose down
 ```
 
-Ako si prije koristio PostgreSQL volume iz starog compose-a, jednom očisti stare volume-e pa ponovo podigni stack.
+Pri prvom pokretanju s novom bazom API primjenjuje migracije i, ako je u `.env` uključeno, puni demo podatke.
 
-## Backend lokalno (API na hostu, baza u Dockeru)
+---
+
+## Konfiguracija (`.env`)
+
+Tajne se **ne** čuvaju u kodu ni u `appsettings.json`. Koristi se datoteka `.env` u korijenu projekta.
+
+Za ocjenjivanje dostupan je arhiv **[`.env-tajne.zip`](.env-tajne.zip)** u korijenu repozitorija:
+
+| Stavka | Vrijednost |
+|--------|------------|
+| **Lozinka arhive** | `OvoJeSifra1!` |
+| **Sadržaj** | datoteka `.env` (SQL Server, JWT, RabbitMQ, Stripe/PayPal sandbox, seed) |
+
+Nakon raspakivanja `.env` u korijen pokreni `docker compose up -d --build` kao gore.
+
+Za vlastiti razvoj kopiraj [`.env.example`](.env.example) u `.env` i postavi vrijednosti. Važne varijable:
+
+- **`SQLSERVER_DATABASE`** — ime baze (FIT: broj indeksa bez prefiksa IB, npr. `210169`)
+- **`SQLSERVER_SA_PASSWORD`** — mora zadovoljiti [SQL Server pravila lozinke](https://learn.microsoft.com/en-us/sql/relational-databases/security/password-policy)
+- **`SEED_USERS_PASSWORD`** — lozinka za sve demo korisnike u bazi
+- **`SEED_RUN_DEMO_DATA_ON_STARTUP`** — `true` za automatski demo seed pri startu API-ja
+
+---
+
+## Korisnici za testiranje
+
+Nakon uspješnog seeda (automatski pri Docker startu, ako je konfigurirano u `.env`):
+
+| Uloga | E-mail | Lozinka | Klijent |
+|-------|--------|---------|---------|
+| Administrator | `admin@arena.local` | `OvoJeSifra1!` | Desktop (Windows) |
+| Demo igrač | `amir.hadzic@arena.local` | `OvoJeSifra1!` | Mobile (Android) |
+| Demo organizator | `tarik.selimovic@arena.local` | `OvoJeSifra1!` | Mobile ili desktop |
+
+Lozinka odgovara vrijednosti **`SEED_USERS_PASSWORD`** u `.env`. Ostali demo računi: `ime.prezime@arena.local` (npr. `dino.basic@arena.local`).
+
+U Development okruženju demo podatke je moguće ponovo učitati: `POST /api/dev/seed-demo-data` (Swagger).
+
+---
+
+## Izdanje aplikacija (GitHub Releases)
+
+Gotovi buildovi za predaju nalaze se na kartici **Releases** ovog repozitorija:
+
+| Arhiva | Sadržaj |
+|--------|---------|
+| **fit-build-mobile.zip** | `app-release.apk` (Android) |
+| **fit-build-desktop.zip** | Windows `Release` (pokretanje: `arena_book_desktop.exe`) |
+
+**Mobile (emulator):** API na hostu — `http://10.0.2.2:5000` (ugrađeno u release build).
+
+**Desktop:** API na hostu — `http://localhost:5000` (ugrađeno u release build).
+
+Detalji za mobilni klijent: [`mobile/README.md`](mobile/README.md).
+
+---
+
+## Lokalni razvoj (opcionalno)
+
+### Backend na hostu (baza u Dockeru)
 
 ```powershell
 cd backend
-$env:ConnectionStrings__DefaultConnection="Server=localhost,1433;Database=ArenaBook;User Id=sa;Password=ISTA_KAO_U_ENV;TrustServerCertificate=True;MultipleActiveResultSets=true"
+$env:ConnectionStrings__DefaultConnection="Server=localhost,1433;Database=210169;User Id=sa;Password=IZ_ENV;TrustServerCertificate=True;MultipleActiveResultSets=true"
 dotnet run --project ArenaBook.Api
 ```
 
-Lozinka i baza moraju odgovarati `.env`. Worker:
-
-```powershell
-$env:RabbitMQ__Host="localhost"
-$env:RabbitMQ__Port="5672"
-$env:RabbitMQ__UserName="arena"
-$env:RabbitMQ__Password="ISTA_KAO_RABBITMQ_PASS_U_ENV"
-$env:RabbitMQ__VirtualHost="/"
-dotnet run --project ArenaBook.Worker
-```
-
-## Flutter desktop — `API_BASE_URL`
+### Flutter desktop
 
 ```powershell
 cd desktop
@@ -74,7 +124,7 @@ flutter pub get
 flutter run -d windows --dart-define=API_BASE_URL=http://localhost:5000
 ```
 
-## Flutter mobile (Android)
+### Flutter mobile
 
 ```powershell
 cd mobile
@@ -82,30 +132,10 @@ flutter pub get
 flutter run --dart-define=API_BASE_URL=http://10.0.2.2:5000
 ```
 
-Za Android emulator: `http://10.0.2.2:5000`. Za desktop/Windows admin: `http://localhost:5000`. Detalji u [`mobile/README.md`](mobile/README.md) i [`recommender-dokumentacija.md`](recommender-dokumentacija.md).
+---
 
-## Korisnički podaci za predaju
+## Dokumentacija
 
-Demo korisnici i podaci u bazi kreiraju se **automatski** pri startu API-ja u Dockeru ako je u `.env` postavljeno:
-
-```env
-SEED_RUN_DEMO_DATA_ON_STARTUP=true
-SEED_ADMIN_EMAIL=admin@arena.local
-SEED_USERS_PASSWORD=OvoJeSifra1!
-```
-
-(Nazive varijabli i primjer vrijednosti vidi u [`.env.example`](.env.example). Stvarni `.env` s tajnama **nije** u Git-u — za predaju ide u `.env-tajne.zip`.)
-
-Nakon `docker compose up -d --build` prijava:
-
-| Uloga | E-mail | Lozinka | Klijent |
-|-------|--------|---------|---------|
-| **Administrator** | `admin@arena.local` | `OvoJeSifra1!` | Flutter **desktop** (Windows) |
-| **Demo igrač** | `amir.hadzic@arena.local` | `OvoJeSifra1!` | Flutter **mobile** (Android) |
-| **Demo organizator** | `tarik.selimovic@arena.local` | `OvoJeSifra1!` | mobile ili desktop |
-
-Lozinka je ista za **sve** seed račune (`SEED_USERS_PASSWORD`). Ostali demo igrači slijede obrazac `ime.prezime@arena.local` (npr. `dino.basic@arena.local`, `haris.delic@arena.local`).
-
-**Baza:** u `.env` postavi `SQLSERVER_DATABASE` prema uputama FIT-a (broj indeksa bez prefiksa IB, npr. `210169`). Trenutna razvojna vrijednost može biti drugačija — važno je da odgovara imenu baze u tvom `.env` pri predaji.
-
-**Napomena:** u Development okruženju demo seed možeš ponovo pokrenuti i ručno: `POST /api/dev/seed-demo-data` (Swagger).
+- [Sustav preporuke](recommender-dokumentacija.md)
+- [Backend](backend/README.md)
+- [Mobile klijent](mobile/README.md)
