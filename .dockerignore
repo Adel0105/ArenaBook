@@ -1,0 +1,10 @@
+**/.git
+**/.vs
+**/bin
+**/obj
+**/*.user
+**/appsettings.Development.json
+**/launchSettings.json
+**/.env
+**/PROJEKT_PODSJETNIK.md
+
