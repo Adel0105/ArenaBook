@@ -102,6 +102,9 @@ public sealed class AuthService : IAuthService
         if (user is null || !await _userManager.CheckPasswordAsync(user, request.Password))
             return AuthOperationResult.Fail(AuthMessages.InvalidCredentials);
 
+        if (await _userManager.IsLockedOutAsync(user))
+            return AuthOperationResult.Fail(AuthMessages.AccountLocked);
+
         var roles = await _userManager.GetRolesAsync(user);
         var tokens = _jwtTokenFactory.CreateTokens(user, roles);
         return AuthOperationResult.Ok(tokens);

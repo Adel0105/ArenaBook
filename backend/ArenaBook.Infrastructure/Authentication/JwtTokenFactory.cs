@@ -33,6 +33,7 @@ public sealed class JwtTokenFactory
             new(ClaimTypes.Email, user.Email ?? string.Empty),
             new(ClaimTypes.GivenName, user.FirstName),
             new(ClaimTypes.Surname, user.LastName),
+            new(JwtClaimTypes.SecurityStamp, user.SecurityStamp ?? string.Empty),
         };
 
         foreach (var role in roles)

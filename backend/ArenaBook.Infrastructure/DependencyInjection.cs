@@ -68,17 +68,7 @@ public static class DependencyInjection
                 };
                 options.Events = new JwtBearerEvents
                 {
-                    OnTokenValidated = async context =>
-                    {
-                        var jti = context.Principal?.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
-                        if (string.IsNullOrEmpty(jti))
-                            return;
-
-                        var revocation = context.HttpContext.RequestServices
-                            .GetRequiredService<IJwtTokenRevocationService>();
-                        if (await revocation.IsRevokedAsync(jti, context.HttpContext.RequestAborted))
-                            context.Fail("Token je opozvan.");
-                    },
+                    OnTokenValidated = JwtAccessTokenValidator.ValidateAsync,
                 };
             });
 

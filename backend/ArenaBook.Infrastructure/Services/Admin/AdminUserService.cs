@@ -222,6 +222,7 @@ public sealed class AdminUserService : IAdminUserService
         {
             await _userManager.SetLockoutEnabledAsync(user, true);
             await _userManager.SetLockoutEndDateAsync(user, DateTimeOffset.UtcNow.AddYears(100));
+            await _userManager.UpdateSecurityStampAsync(user);
         }
         else
         {
