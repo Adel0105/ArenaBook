@@ -33,5 +33,7 @@ public sealed class ScheduledSessionListItemResponse
     public string? InviteCode { get; set; }
 
     public decimal PriceTotalCoins { get; set; }
+
+    public decimal PricePerParticipantCoins { get; set; }
 }
 

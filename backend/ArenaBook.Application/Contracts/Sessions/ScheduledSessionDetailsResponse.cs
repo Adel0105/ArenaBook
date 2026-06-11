@@ -34,6 +34,10 @@ public sealed class ScheduledSessionDetailsResponse
 
     public decimal PriceTotalCoins { get; set; }
 
+    public decimal PricePerParticipantCoins { get; set; }
+
+    public bool IsPricingLocked { get; set; }
+
     public IReadOnlyList<ScheduledSessionParticipantResponse> Participants { get; set; } = Array.Empty<ScheduledSessionParticipantResponse>();
 }
 

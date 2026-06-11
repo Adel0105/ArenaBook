@@ -127,7 +127,8 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
                     .Where(u => u.Id == s.OrganizerUserId)
                     .Select(u => u.Email)
                     .FirstOrDefault(),
-                s.Hall.PricePerHourCoins,
+                s.PriceTotalCoins,
+                s.PricePerParticipantCoins,
             })
             .ToListAsync(cancellationToken);
 
@@ -135,7 +136,6 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
             .Select(s =>
             {
                 var hallScore = hallScores.GetValueOrDefault(s.HallId, 0);
-                var price = ComputeSessionPrice(s.PricePerHourCoins, s.StartUtc, s.EndUtc);
                 return new RecommendedSessionResponse
                 {
                     SessionId = s.Id,
@@ -147,7 +147,7 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
                     EndUtc = s.EndUtc,
                     ParticipantCount = s.ParticipantCount,
                     MaxParticipants = s.MaxParticipants,
-                    PriceTotalCoins = price,
+                    PriceTotalCoins = s.PriceTotalCoins,
                     OrganizerEmail = s.OrganizerEmail,
                     Score = hallScore,
                     Explanation = hallScore > 0
@@ -203,14 +203,6 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
         $"Dvorana u gradu {cityName}. Bodovi: {score:F0} " +
         $"(👍 {row.LikeCount}×{LikePoints}, 👎 {row.DislikeCount}×{DislikePoints}, " +
         $"★ {row.StarPoints}×{StarPoints}, 💬 {row.CommentCount}×{CommentPoints}).";
-
-    private static decimal ComputeSessionPrice(decimal pricePerHour, DateTime start, DateTime end)
-    {
-        var hours = (decimal)(end - start).TotalHours;
-        if (hours < 0.25m)
-            hours = 0.25m;
-        return Math.Round(pricePerHour * hours, 2, MidpointRounding.AwayFromZero);
-    }
 
     private sealed class HallEngagementRow
     {

@@ -1,4 +1,5 @@
 using ArenaBook.Application.Abstractions;
+using ArenaBook.Application.Sessions;
 using ArenaBook.Domain;
 using ArenaBook.Domain.Entities;
 using ArenaBook.Domain.Security;
@@ -444,6 +445,8 @@ public sealed class DemoDataSeedService : IDemoDataSeedService
                 _ => 2,
             };
             var kindId = rng.Next(100) < 80 ? 1 : 2;
+            var end = start.AddHours(2);
+            var totalPrice = SessionPricing.ComputeTotalPrice(hall.PricePerHourCoins, start, end);
 
             var session = new ScheduledSession
             {
@@ -452,7 +455,9 @@ public sealed class DemoDataSeedService : IDemoDataSeedService
                 SessionKindId = kindId,
                 SessionLifecycleStatusId = statusId,
                 StartUtc = start,
-                EndUtc = start.AddHours(2),
+                EndUtc = end,
+                PriceTotalCoins = totalPrice,
+                PricePerParticipantCoins = SessionPricing.ComputeParticipantJoinPrice(totalPrice),
                 MaxParticipants = 8 + rng.Next(0, 14),
                 MaxAgeYears = kindId == 1 ? 18 + rng.Next(0, 15) : null,
                 InviteCode = kindId == 2 ? $"INV-{hall.Id}-{n:D4}" : null,

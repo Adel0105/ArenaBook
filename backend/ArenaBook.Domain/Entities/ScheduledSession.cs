@@ -22,6 +22,12 @@ public sealed class ScheduledSession
 
     public DateTime EndUtc { get; set; }
 
+    /// <summary>Ukupna cijena najma dvorane za slot (snapshot pri kreiranju / prije prvog plaćanja).</summary>
+    public decimal PriceTotalCoins { get; set; }
+
+    /// <summary>Iznos koji jedan učesnik plaća pri pridruživanju (snapshot).</summary>
+    public decimal PricePerParticipantCoins { get; set; }
+
     public int MaxParticipants { get; set; }
 
     public int? MaxAgeYears { get; set; }

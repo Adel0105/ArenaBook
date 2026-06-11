@@ -1,6 +1,7 @@
 using ArenaBook.Application.Abstractions;
 using ArenaBook.Application.Abstractions.Sessions;
 using ArenaBook.Application.Common.Exceptions;
+using ArenaBook.Application.Sessions;
 using BusinessRuleException = ArenaBook.Application.Common.Exceptions.ValidationException;
 using ArenaBook.Application.Common.Paging;
 using ArenaBook.Application.Contracts.Sessions;
@@ -92,7 +93,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 s.EndUtc,
                 s.MaxParticipants,
                 s.MaxAgeYears,
-                PricePerHour = s.Hall.PricePerHourCoins,
+                s.PriceTotalCoins,
+                s.PricePerParticipantCoins,
                 ParticipantCount = s.Participants.Count,
             });
 
@@ -105,29 +107,25 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             .Select(u => new { u.Id, u.Email })
             .ToDictionaryAsync(x => x.Id, x => x.Email, cancellationToken);
 
-        var items = rows.Select(r =>
+        var items = rows.Select(r => new ScheduledSessionListItemResponse
         {
-            var hours = (decimal)(r.EndUtc - r.StartUtc).TotalHours;
-            var price = hours > 0 ? Math.Round(r.PricePerHour * hours, 2) : 0;
-            return new ScheduledSessionListItemResponse
-            {
-                Id = r.Id,
-                HallId = r.HallId,
-                HallName = r.HallName,
-                OrganizerUserId = r.OrganizerUserId,
-                OrganizerEmail = emails.GetValueOrDefault(r.OrganizerUserId),
-                SessionKindId = r.SessionKindId,
-                SessionKindCode = r.KindCode,
-                SessionLifecycleStatusId = r.SessionLifecycleStatusId,
-                SessionLifecycleCode = r.StatusCode,
-                StartUtc = r.StartUtc,
-                EndUtc = r.EndUtc,
-                MaxParticipants = r.MaxParticipants,
-                ParticipantCount = r.ParticipantCount,
-                MaxAgeYears = r.MaxAgeYears,
-                InviteCode = null,
-                PriceTotalCoins = price,
-            };
+            Id = r.Id,
+            HallId = r.HallId,
+            HallName = r.HallName,
+            OrganizerUserId = r.OrganizerUserId,
+            OrganizerEmail = emails.GetValueOrDefault(r.OrganizerUserId),
+            SessionKindId = r.SessionKindId,
+            SessionKindCode = r.KindCode,
+            SessionLifecycleStatusId = r.SessionLifecycleStatusId,
+            SessionLifecycleCode = r.StatusCode,
+            StartUtc = r.StartUtc,
+            EndUtc = r.EndUtc,
+            MaxParticipants = r.MaxParticipants,
+            ParticipantCount = r.ParticipantCount,
+            MaxAgeYears = r.MaxAgeYears,
+            InviteCode = null,
+            PriceTotalCoins = r.PriceTotalCoins,
+            PricePerParticipantCoins = r.PricePerParticipantCoins,
         }).ToList();
 
         return new PagedListResponse<ScheduledSessionListItemResponse>
@@ -163,7 +161,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 s.MaxAgeYears,
                 s.InviteCode,
                 s.CreatedUtc,
-                PricePerHour = s.Hall.PricePerHourCoins,
+                s.PriceTotalCoins,
+                s.PricePerParticipantCoins,
             })
             .FirstOrDefaultAsync(cancellationToken);
 
@@ -175,6 +174,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             .Select(p => new { p.Id, p.UserId, p.JoinedUtc, p.CoinsPaid, p.IsOrganizer })
             .ToListAsync(cancellationToken);
 
+        var isPricingLocked = participants.Any(p => p.CoinsPaid > 0);
+
         var userIds = participants.Select(p => p.UserId).Distinct().ToList();
         if (!userIds.Contains(row.OrganizerUserId))
             userIds.Add(row.OrganizerUserId);
@@ -183,9 +184,6 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             .Where(u => userIds.Contains(u.Id))
             .Select(u => new { u.Id, u.Email })
             .ToDictionaryAsync(x => x.Id, x => x.Email, cancellationToken);
-
-        var hours = (decimal)(row.EndUtc - row.StartUtc).TotalHours;
-        var price = hours > 0 ? Math.Round(row.PricePerHour * hours, 2) : 0;
 
         var canViewInviteCode = CanViewInviteCode(
             row.OrganizerUserId,
@@ -211,7 +209,9 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             MaxAgeYears = row.MaxAgeYears,
             InviteCode = canViewInviteCode ? row.InviteCode : null,
             CreatedUtc = row.CreatedUtc,
-            PriceTotalCoins = price,
+            PriceTotalCoins = row.PriceTotalCoins,
+            PricePerParticipantCoins = row.PricePerParticipantCoins,
+            IsPricingLocked = isPricingLocked,
             Participants = participants.Select(p => new ScheduledSessionParticipantResponse
             {
                 Id = p.Id,
@@ -313,11 +313,10 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (session.SessionLifecycleStatusId != confirmedId)
             throw new ConflictException("Cijena u koinima za pridruživanje dostupna je samo za potvrđen termin.");
 
-        var cost = ComputePrice(session.Hall.PricePerHourCoins, session.StartUtc, session.EndUtc);
         return new SessionJoinCoinQuoteResponse
         {
             ScheduledSessionId = sessionId,
-            CoinsRequired = cost,
+            CoinsRequired = session.PricePerParticipantCoins,
             CurrencyCode = "COIN",
         };
     }
@@ -351,12 +350,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (request.MaxParticipants > Math.Min(hall.CapacityPeople, platformMax))
             throw new BusinessRuleException("Maksimalan broj učesnika premašuje kapacitet dvorane ili platformski limit.", Err());
 
-        var totalPrice = ComputePrice(hall.PricePerHourCoins, request.StartUtc, request.EndUtc);
+        var totalPrice = SessionPricing.ComputeTotalPrice(hall.PricePerHourCoins, request.StartUtc, request.EndUtc);
         if (totalPrice < minPrice)
             throw new BusinessRuleException($"Ukupna cijena termina mora biti najmanje {minPrice} koina.", Err());
 
         if (await HasOverlapAsync(request.HallId, request.StartUtc, request.EndUtc, null, cancellationToken))
             throw new ConflictException("Termin se preklapa s drugim aktivnim terminom u istoj dvorani.");
+
+        var participantPrice = SessionPricing.ComputeParticipantJoinPrice(totalPrice);
 
         string? invite = null;
         if (kind.Code == "INVITE")
@@ -376,6 +377,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             SessionLifecycleStatusId = pendingId,
             StartUtc = request.StartUtc,
             EndUtc = request.EndUtc,
+            PriceTotalCoins = totalPrice,
+            PricePerParticipantCoins = participantPrice,
             MaxParticipants = request.MaxParticipants,
             MaxAgeYears = kind.Code == "PUBLIC" ? request.MaxAgeYears : null,
             InviteCode = invite,
@@ -412,6 +415,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 request.MaxParticipants,
                 request.MaxAgeYears,
                 HasInviteCode = !string.IsNullOrEmpty(invite),
+                totalPrice,
+                participantPrice,
             }));
         await _db.SaveChangesAsync(cancellationToken);
 
@@ -443,6 +448,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (entity.SessionLifecycleStatusId == cancelledId || entity.SessionLifecycleStatusId == completedId)
             throw new ConflictException("Termin je završen ili otkazan i ne može se mijenjati.");
 
+        var hasPaidParticipants = await HasPaidParticipantsAsync(id, cancellationToken);
+        if (hasPaidParticipants
+            && (entity.StartUtc != request.StartUtc || entity.EndUtc != request.EndUtc))
+        {
+            throw new ConflictException(
+                "Vrijeme termina ne može se mijenjati nakon što su učesnici platili pridruživanje.");
+        }
+
         var kind = await _db.SessionKinds.AsNoTracking().FirstAsync(k => k.Id == entity.SessionKindId, cancellationToken);
         var platformMax = await GetPlatformIntAsync(MaxParticipantsKey, 22, cancellationToken);
         if (request.MaxParticipants > Math.Min(entity.Hall.CapacityPeople, platformMax))
@@ -452,10 +465,20 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (request.MaxParticipants < participantCount)
             throw new ConflictException("Maksimalan broj učesnika ne sme biti manji od trenutnog broja prijavljenih.");
 
-        var minPrice = await GetPlatformDecimalAsync(MinSessionPriceKey, 0, cancellationToken);
-        var totalPrice = ComputePrice(entity.Hall.PricePerHourCoins, request.StartUtc, request.EndUtc);
-        if (totalPrice < minPrice)
-            throw new BusinessRuleException($"Ukupna cijena termina mora biti najmanje {minPrice} koina.", Err());
+        decimal? newTotalPrice = null;
+        decimal? newParticipantPrice = null;
+        if (!hasPaidParticipants)
+        {
+            var minPrice = await GetPlatformDecimalAsync(MinSessionPriceKey, 0, cancellationToken);
+            newTotalPrice = SessionPricing.ComputeTotalPrice(
+                entity.Hall.PricePerHourCoins,
+                request.StartUtc,
+                request.EndUtc);
+            if (newTotalPrice < minPrice)
+                throw new BusinessRuleException($"Ukupna cijena termina mora biti najmanje {minPrice} koina.", Err());
+
+            newParticipantPrice = SessionPricing.ComputeParticipantJoinPrice(newTotalPrice.Value);
+        }
 
         if (await HasOverlapAsync(entity.HallId, request.StartUtc, request.EndUtc, id, cancellationToken))
             throw new ConflictException("Termin se preklapa s drugim aktivnim terminom u istoj dvorani.");
@@ -464,6 +487,11 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         entity.EndUtc = request.EndUtc;
         entity.MaxParticipants = request.MaxParticipants;
         entity.MaxAgeYears = kind.Code == "PUBLIC" ? request.MaxAgeYears : null;
+        if (newTotalPrice is not null && newParticipantPrice is not null)
+        {
+            entity.PriceTotalCoins = newTotalPrice.Value;
+            entity.PricePerParticipantCoins = newParticipantPrice.Value;
+        }
 
         AppendAudit(
             id,
@@ -477,6 +505,9 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 request.EndUtc,
                 request.MaxParticipants,
                 request.MaxAgeYears,
+                priceTotalCoins = entity.PriceTotalCoins,
+                pricePerParticipantCoins = entity.PricePerParticipantCoins,
+                pricingLocked = hasPaidParticipants,
             }));
         await _db.SaveChangesAsync(cancellationToken);
         return await GetByIdAsync(id, userId, isAdministrator, cancellationToken);
@@ -620,7 +651,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (count >= session.MaxParticipants)
             throw new ConflictException("Termin je popunjen.");
 
-        var cost = ComputePrice(session.Hall.PricePerHourCoins, session.StartUtc, session.EndUtc);
+        var cost = session.PricePerParticipantCoins;
         var wallet = await _db.UserCoinWallets
             .FirstOrDefaultAsync(w => w.UserId == userId, cancellationToken);
         if (wallet is null)
@@ -724,13 +755,10 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         }
     }
 
-    private static decimal ComputePrice(decimal pricePerHour, DateTime start, DateTime end)
-    {
-        var hours = (decimal)(end - start).TotalHours;
-        if (hours <= 0)
-            return 0;
-        return Math.Round(pricePerHour * hours, 2);
-    }
+    private Task<bool> HasPaidParticipantsAsync(int sessionId, CancellationToken cancellationToken) =>
+        _db.ScheduledSessionParticipants.AnyAsync(
+            p => p.ScheduledSessionId == sessionId && p.CoinsPaid > 0,
+            cancellationToken);
 
     private static int GetAgeAt(DateOnly birth, DateTime atUtc)
     {
