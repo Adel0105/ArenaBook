@@ -27,6 +27,7 @@ public interface IScheduledSessionService
     Task<ScheduledSessionDetailsResponse> CreateAsync(
         CreateScheduledSessionRequest request,
         string organizerUserId,
+        bool isAdministrator,
         CancellationToken cancellationToken = default);
 
     Task<ScheduledSessionDetailsResponse> UpdateAsync(

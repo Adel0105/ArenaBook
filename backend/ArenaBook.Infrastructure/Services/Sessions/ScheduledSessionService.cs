@@ -324,11 +324,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
     public async Task<ScheduledSessionDetailsResponse> CreateAsync(
         CreateScheduledSessionRequest request,
         string organizerUserId,
+        bool isAdministrator,
         CancellationToken cancellationToken = default)
     {
         var validation = await _createValidator.ValidateAsync(request, cancellationToken);
         if (!validation.IsValid)
             throw new ArenaBook.Application.Common.Exceptions.ValidationException("Validacija nije prošla.", validation.ToErrorDictionary());
+
+        EnforceSchedulingPolicy(request.StartUtc, request.EndUtc, isAdministrator);
 
         var kind = await _db.SessionKinds.AsNoTracking().FirstOrDefaultAsync(k => k.Id == request.SessionKindId, cancellationToken);
         if (kind is null)
@@ -420,7 +423,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             }));
         await _db.SaveChangesAsync(cancellationToken);
 
-        return await GetByIdAsync(entity.Id, organizerUserId, isAdministrator: false, cancellationToken);
+        return await GetByIdAsync(entity.Id, organizerUserId, isAdministrator, cancellationToken);
     }
 
     public async Task<ScheduledSessionDetailsResponse> UpdateAsync(
@@ -433,6 +436,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         var validation = await _updateValidator.ValidateAsync(request, cancellationToken);
         if (!validation.IsValid)
             throw new ArenaBook.Application.Common.Exceptions.ValidationException("Validacija nije prošla.", validation.ToErrorDictionary());
+
+        EnforceSchedulingPolicy(request.StartUtc, request.EndUtc, isAdministrator);
 
         var entity = await _db.ScheduledSessions
             .Include(s => s.Hall)
@@ -577,6 +582,12 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         var completedId = await LifecycleIdAsync("COMPLETED", cancellationToken);
         if (entity.SessionLifecycleStatusId != confirmedId)
             throw new ConflictException("Samo potvrđen termin može biti označen kao završen.");
+
+        if (!SessionTimeRules.CanMarkCompleted(entity.EndUtc, DateTime.UtcNow))
+        {
+            throw new ConflictException(
+                "Termin se može označiti kao završen tek nakon planiranog kraja (EndUtc).");
+        }
 
         var prev = entity.SessionLifecycleStatusId;
         entity.SessionLifecycleStatusId = completedId;
@@ -759,6 +770,21 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         _db.ScheduledSessionParticipants.AnyAsync(
             p => p.ScheduledSessionId == sessionId && p.CoinsPaid > 0,
             cancellationToken);
+
+    private static void EnforceSchedulingPolicy(DateTime startUtc, DateTime endUtc, bool isAdministrator)
+    {
+        var errors = SessionTimeRules.ValidateSchedulingPolicy(
+            startUtc,
+            endUtc,
+            allowHistoricalTimes: isAdministrator,
+            DateTime.UtcNow);
+        if (errors.Count > 0)
+        {
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "Validacija vremena termina nije prošla.",
+                errors.ToDictionary(kv => kv.Key, kv => kv.Value));
+        }
+    }
 
     private static int GetAgeAt(DateOnly birth, DateTime atUtc)
     {

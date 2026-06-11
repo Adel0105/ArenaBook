@@ -133,7 +133,7 @@ public static class ScheduledSessionEndpoints
         var organizerId = IsAdministrator(user) && !string.IsNullOrWhiteSpace(body.OrganizerUserId)
             ? body.OrganizerUserId!.Trim()
             : RequireUserId(user);
-        return service.CreateAsync(body, organizerId, cancellationToken);
+        return service.CreateAsync(body, organizerId, IsAdministrator(user), cancellationToken);
     }
 
     private static Task<ScheduledSessionDetailsResponse> UpdateAsync(
