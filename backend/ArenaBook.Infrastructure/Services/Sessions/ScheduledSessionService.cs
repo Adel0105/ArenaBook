@@ -13,6 +13,7 @@ using ArenaBook.Infrastructure.Validation;
 using FluentValidation;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Cryptography;
 
 namespace ArenaBook.Infrastructure.Services.Sessions;
 
@@ -91,7 +92,6 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 s.EndUtc,
                 s.MaxParticipants,
                 s.MaxAgeYears,
-                s.InviteCode,
                 PricePerHour = s.Hall.PricePerHourCoins,
                 ParticipantCount = s.Participants.Count,
             });
@@ -125,7 +125,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 MaxParticipants = r.MaxParticipants,
                 ParticipantCount = r.ParticipantCount,
                 MaxAgeYears = r.MaxAgeYears,
-                InviteCode = r.InviteCode,
+                InviteCode = null,
                 PriceTotalCoins = price,
             };
         }).ToList();
@@ -139,7 +139,11 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         };
     }
 
-    public async Task<ScheduledSessionDetailsResponse> GetByIdAsync(int id, CancellationToken cancellationToken = default)
+    public async Task<ScheduledSessionDetailsResponse> GetByIdAsync(
+        int id,
+        string? viewerUserId,
+        bool isAdministrator,
+        CancellationToken cancellationToken = default)
     {
         var row = await _db.ScheduledSessions.AsNoTracking()
             .Where(s => s.Id == id)
@@ -172,6 +176,9 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             .ToListAsync(cancellationToken);
 
         var userIds = participants.Select(p => p.UserId).Distinct().ToList();
+        if (!userIds.Contains(row.OrganizerUserId))
+            userIds.Add(row.OrganizerUserId);
+
         var userEmails = await _db.Users.AsNoTracking()
             .Where(u => userIds.Contains(u.Id))
             .Select(u => new { u.Id, u.Email })
@@ -179,6 +186,13 @@ public sealed class ScheduledSessionService : IScheduledSessionService
 
         var hours = (decimal)(row.EndUtc - row.StartUtc).TotalHours;
         var price = hours > 0 ? Math.Round(row.PricePerHour * hours, 2) : 0;
+
+        var canViewInviteCode = CanViewInviteCode(
+            row.OrganizerUserId,
+            row.InviteCode,
+            viewerUserId,
+            isAdministrator,
+            participants.Select(p => p.UserId));
 
         return new ScheduledSessionDetailsResponse
         {
@@ -195,7 +209,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             EndUtc = row.EndUtc,
             MaxParticipants = row.MaxParticipants,
             MaxAgeYears = row.MaxAgeYears,
-            InviteCode = row.InviteCode,
+            InviteCode = canViewInviteCode ? row.InviteCode : null,
             CreatedUtc = row.CreatedUtc,
             PriceTotalCoins = price,
             Participants = participants.Select(p => new ScheduledSessionParticipantResponse
@@ -401,7 +415,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             }));
         await _db.SaveChangesAsync(cancellationToken);
 
-        return await GetByIdAsync(entity.Id, cancellationToken);
+        return await GetByIdAsync(entity.Id, organizerUserId, isAdministrator: false, cancellationToken);
     }
 
     public async Task<ScheduledSessionDetailsResponse> UpdateAsync(
@@ -465,7 +479,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 request.MaxAgeYears,
             }));
         await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, cancellationToken);
+        return await GetByIdAsync(id, userId, isAdministrator, cancellationToken);
     }
 
     public async Task<ScheduledSessionDetailsResponse> ConfirmAsync(
@@ -489,7 +503,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         entity.SessionLifecycleStatusId = confirmedId;
         AppendAudit(id, userId, ScheduledSessionAuditActions.Confirmed, prev, confirmedId, null);
         await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, cancellationToken);
+        return await GetByIdAsync(id, userId, isAdministrator, cancellationToken);
     }
 
     public async Task<ScheduledSessionDetailsResponse> CancelAsync(
@@ -510,6 +524,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             entity,
             id,
             userId,
+            isAdministrator,
             ScheduledSessionAuditActions.Cancelled,
             reason,
             cancellationToken);
@@ -536,7 +551,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         entity.SessionLifecycleStatusId = completedId;
         AppendAudit(id, userId, ScheduledSessionAuditActions.Completed, prev, completedId, null);
         await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, cancellationToken);
+        return await GetByIdAsync(id, userId, isAdministrator, cancellationToken);
     }
 
     public async Task DeleteAsync(int id, string actorUserId, CancellationToken cancellationToken = default)
@@ -549,6 +564,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             entity,
             id,
             actorUserId,
+            isAdministrator: true,
             ScheduledSessionAuditActions.Deleted,
             null,
             cancellationToken);
@@ -656,6 +672,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         ScheduledSession entity,
         int id,
         string actorUserId,
+        bool isAdministrator,
         string auditAction,
         string? cancelReason,
         CancellationToken cancellationToken)
@@ -677,7 +694,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             cancelledId,
             SerializeDetails(new { refundsProcessed = true, cancelReason }));
         await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, cancellationToken);
+        return await GetByIdAsync(id, actorUserId, isAdministrator, cancellationToken);
     }
 
     private async Task RefundParticipantsAsync(int sessionId, CancellationToken cancellationToken)
@@ -772,11 +789,38 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             : fallback;
     }
 
+    private static bool CanViewInviteCode(
+        string organizerUserId,
+        string? inviteCode,
+        string? viewerUserId,
+        bool isAdministrator,
+        IEnumerable<string> participantUserIds)
+    {
+        if (string.IsNullOrEmpty(inviteCode))
+            return false;
+
+        if (isAdministrator)
+            return true;
+
+        if (string.IsNullOrEmpty(viewerUserId))
+            return false;
+
+        if (organizerUserId == viewerUserId)
+            return true;
+
+        return participantUserIds.Contains(viewerUserId);
+    }
+
     private static string GenerateInviteCode()
     {
         const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-        var rnd = Random.Shared;
-        return new string(Enumerable.Range(0, 8).Select(_ => chars[rnd.Next(chars.Length)]).ToArray());
+        Span<char> code = stackalloc char[8];
+        Span<byte> randomBytes = stackalloc byte[8];
+        RandomNumberGenerator.Fill(randomBytes);
+        for (var i = 0; i < code.Length; i++)
+            code[i] = chars[randomBytes[i] % chars.Length];
+
+        return new string(code);
     }
 
     private static IReadOnlyDictionary<string, string[]> Err()

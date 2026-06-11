@@ -95,11 +95,16 @@ public static class ScheduledSessionEndpoints
     }
 
     private static Task<ScheduledSessionDetailsResponse> GetByIdAsync(
+        ClaimsPrincipal user,
         IScheduledSessionService service,
         int id,
         CancellationToken cancellationToken)
     {
-        return service.GetByIdAsync(id, cancellationToken);
+        return service.GetByIdAsync(
+            id,
+            RequireUserId(user),
+            IsAdministrator(user),
+            cancellationToken);
     }
 
     private static Task<SessionJoinCoinQuoteResponse> GetJoinCoinQuoteAsync(

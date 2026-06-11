@@ -153,8 +153,13 @@ class _MyOrganizedSessionsScreenState extends State<MyOrganizedSessionsScreen> {
                               '${_fmt.format(s.startUtc.toLocal())} · ${s.sessionLifecycleCode} · ${s.sessionKindCode}',
                             ),
                             children: [
-                              if (s.inviteCode != null)
-                                ListTile(title: Text('Kod: ${s.inviteCode}')),
+                              if (s.sessionKindCode == 'INVITE')
+                                const ListTile(
+                                  title: Text('Privatni termin'),
+                                  subtitle: Text(
+                                    'Kod poziva vidi se u uređivanju termina.',
+                                  ),
+                                ),
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.end,
                                 children: [
