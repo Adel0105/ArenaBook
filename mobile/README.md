@@ -37,7 +37,7 @@ Za lokalni API bez HTTPS-a, u `android/app/src/main/AndroidManifest.xml` na `<ap
 4. **Koini** — Stripe sandbox (kartica + `confirm-sandbox` u Development) ili PayPal (preusmjerenje + capture).
 5. **Preporuke** — CF na početnoj i posebnom ekranu s objašnjenjem.
 6. **Profil** — uređivanje, promjena lozinke, historija rezervacija.
-7. **Reset lozinke** — forgot/reset; u Development API vraća `resetToken` za test.
+7. **Reset lozinke** — forgot/reset. U produkciji token stiže e-mailom (SMTP + Worker). U Development bez SMTP-a API vraća `resetToken` u odgovoru za lokalni test.
 
 ## Test korisnici
 

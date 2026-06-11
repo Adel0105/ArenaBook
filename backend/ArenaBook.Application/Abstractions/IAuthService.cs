@@ -19,7 +19,10 @@ public interface IAuthService
         DateTime? currentTokenExpiresUtc = null,
         CancellationToken cancellationToken = default);
 
-    Task<string?> RequestPasswordResetAsync(ForgotPasswordRequest request, CancellationToken cancellationToken = default);
+    Task<PasswordResetResult> RequestPasswordResetAsync(
+        ForgotPasswordRequest request,
+        bool exposeDevelopmentTokenFallback,
+        CancellationToken cancellationToken = default);
 
     Task ResetPasswordAsync(ResetPasswordRequest request, CancellationToken cancellationToken = default);
 

@@ -33,10 +33,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       _devToken = null;
     });
     try {
-      final token = await widget.api.forgotPassword(_emailCtrl.text.trim());
+      final result = await widget.api.forgotPassword(_emailCtrl.text.trim());
       setState(() {
-        _message = 'Ako račun postoji, poslan je e-mail za reset lozinke.';
-        _devToken = token;
+        _message = result.message;
+        _devToken = result.resetToken;
       });
     } on ApiError catch (e) {
       setState(() => _message = e.message);

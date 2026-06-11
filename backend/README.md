@@ -14,3 +14,5 @@ dotnet run --project ArenaBook.Worker
 ```
 
 Docker koristi `Dockerfile` unutar svakog projekta; kontekst builda je korijen repozitorija (`docker compose` iz korijena). Baza u compose-u je **SQL Server** (`sqlserver` servis); connection string dolazi iz `.env` / Compose okruženja, ne iz koda.
+
+**Reset lozinke:** API stavlja `password_reset_email` poruku u RabbitMQ; Worker šalje SMTP e-mail s tokenom. Konfiguracija: `SMTP_*` u `.env` (vidi glavni README).

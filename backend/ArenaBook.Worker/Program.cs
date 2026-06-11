@@ -1,5 +1,7 @@
+using ArenaBook.Application.Abstractions.Messaging;
 using ArenaBook.Application.Options;
 using ArenaBook.Infrastructure.Persistence;
+using ArenaBook.Infrastructure.Services.Messaging;
 using ArenaBook.Worker;
 using Microsoft.EntityFrameworkCore;
 
@@ -26,6 +28,9 @@ builder.Services
     .BindConfiguration(RabbitMqOptions.SectionName)
     .Validate(o => !string.IsNullOrWhiteSpace(o.Host), "RabbitMQ host is required")
     .ValidateOnStart();
+
+builder.Services.Configure<SmtpOptions>(builder.Configuration.GetSection(SmtpOptions.SectionName));
+builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
 
 builder.Services.AddHostedService<Worker>();
 

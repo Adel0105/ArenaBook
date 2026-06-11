@@ -120,7 +120,7 @@ class ArenaBookApi {
     }
   }
 
-  Future<String?> forgotPassword(String email) async {
+  Future<({String message, String? resetToken})> forgotPassword(String email) async {
     final res = await _client.post(
       _uri('/api/auth/forgot-password'),
       headers: _headers(jsonBody: true),
@@ -130,7 +130,10 @@ class ArenaBookApi {
       throw _badResponse(res);
     }
     final map = jsonDecode(res.body) as Map<String, dynamic>;
-    return map['resetToken'] as String?;
+    return (
+      message: map['message'] as String? ?? 'Zahtjev je zaprimljen.',
+      resetToken: map['resetToken'] as String?,
+    );
   }
 
   Future<void> resetPassword({

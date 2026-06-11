@@ -117,7 +117,10 @@ public static class DependencyInjection
         services.Configure<StripeOptions>(configuration.GetSection(StripeOptions.SectionName));
         services.Configure<PayPalOptions>(configuration.GetSection(PayPalOptions.SectionName));
         services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
+        services.Configure<SmtpOptions>(configuration.GetSection(SmtpOptions.SectionName));
         services.AddSingleton<IRabbitMqEventPublisher, RabbitMqEventPublisher>();
+        services.AddSingleton<IEmailSender, SmtpEmailSender>();
+        services.AddSingleton<IPasswordResetDispatchService, RabbitMqPasswordResetDispatchService>();
         services.AddHttpClient(
             "paypal",
             (sp, client) =>

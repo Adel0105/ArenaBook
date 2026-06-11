@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Hosting;
 using ArenaBook.Application.Abstractions;
+using ArenaBook.Application.Abstractions.Messaging;
 using ArenaBook.Application.Auth;
 using ArenaBook.Application.Authorization;
 using ArenaBook.Application.Contracts.Auth;
@@ -135,13 +136,40 @@ public static class ArenaBookAuthEndpoints
 
     private static async Task<IResult> ForgotPasswordAsync(
         IAuthService authService,
+        IPasswordResetDispatchService passwordResetDispatch,
         ForgotPasswordRequest body,
         IWebHostEnvironment env,
         CancellationToken cancellationToken)
     {
-        var token = await authService.RequestPasswordResetAsync(body, cancellationToken);
-        if (env.IsDevelopment() && token is not null)
-            return Results.Ok(new { message = "Token za reset (samo Development).", resetToken = token });
+        if (!env.IsDevelopment() && !passwordResetDispatch.IsAvailable)
+        {
+            return Results.Problem(
+                title: "Reset lozinke nije dostupan",
+                detail: "Za slanje e-maila moraju biti konfigurirani RabbitMQ i SMTP (vidi README).",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        PasswordResetResult result;
+        try
+        {
+            result = await authService.RequestPasswordResetAsync(body, env.IsDevelopment(), cancellationToken);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.Problem(
+                title: "Reset lozinke nije dostupan",
+                detail: ex.Message,
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        if (result.DevelopmentToken is not null)
+        {
+            return Results.Ok(new
+            {
+                message = "Development: SMTP nije aktivan — token je u odgovoru (ne šalje se e-mail).",
+                resetToken = result.DevelopmentToken,
+            });
+        }
 
         return Results.Ok(new { message = "Ako račun postoji, poslan je e-mail za reset lozinke." });
     }
