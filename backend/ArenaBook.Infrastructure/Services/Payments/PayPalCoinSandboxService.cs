@@ -245,11 +245,29 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
             "paypal-capture-" + orderId + "-" + Guid.NewGuid().ToString("N"),
             cancellationToken);
 
-        var captureId = ExtractCaptureIdFromCaptureResponse(captureDoc);
-        if (string.IsNullOrEmpty(captureId))
+        var captureInfo = ExtractCaptureFromCaptureResponse(captureDoc);
+        if (captureInfo is null || string.IsNullOrEmpty(captureInfo.Value.CaptureId))
             throw new InvalidOperationException("PayPal capture odgovor ne sadrži ID uplate.");
 
-        var finalized = await FinalizePayPalCaptureAsync(payment.Id, captureId, null, cancellationToken);
+        var captureStatus = captureInfo.Value.Status;
+        if (string.IsNullOrWhiteSpace(captureStatus))
+        {
+            captureStatus = await GetPayPalCaptureStatusAsync(
+                captureInfo.Value.CaptureId,
+                cancellationToken);
+        }
+
+        if (!IsPayPalCaptureCompleted(captureStatus))
+        {
+            await RejectIncompletePayPalCaptureAsync(payment, captureStatus, cancellationToken);
+            throw new ConflictException($"PayPal capture nije uspio (status: {captureStatus}).");
+        }
+
+        var finalized = await FinalizePayPalCaptureAsync(
+            payment.Id,
+            captureInfo.Value.CaptureId,
+            null,
+            cancellationToken);
         if (!finalized.Credited && !finalized.AlreadyCompleted)
             throw new ConflictException("Uplata je već obrađena.");
 
@@ -451,6 +469,12 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
 
         var captureId = resource.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
         if (string.IsNullOrEmpty(captureId))
+            return;
+
+        var captureStatus = resource.TryGetProperty("status", out var statusEl)
+            ? statusEl.GetString()
+            : null;
+        if (!IsPayPalCaptureCompleted(captureStatus))
             return;
 
         var externalPaymentId = TryParseCustomId(resource);
@@ -668,7 +692,62 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         return string.Empty;
     }
 
-    private static string? ExtractCaptureIdFromCaptureResponse(JsonDocument doc)
+    private readonly record struct PayPalCaptureInfo(string CaptureId, string Status);
+
+    private static bool IsPayPalCaptureCompleted(string? status) =>
+        string.Equals(status, "COMPLETED", StringComparison.OrdinalIgnoreCase);
+
+    private async Task RejectIncompletePayPalCaptureAsync(
+        ExternalPaymentRecord payment,
+        string captureStatus,
+        CancellationToken cancellationToken)
+    {
+        if (string.Equals(captureStatus, "PENDING", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var failedId = await StatusIdByCodeAsync("FAILED", cancellationToken);
+        if (payment.PaymentProcessingStatusId != failedId)
+        {
+            payment.PaymentProcessingStatusId = failedId;
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    private async Task<string> GetPayPalCaptureStatusAsync(
+        string captureId,
+        CancellationToken cancellationToken)
+    {
+        using var doc = await GetPayPalCaptureJsonAsync(captureId, cancellationToken);
+        return doc.RootElement.TryGetProperty("status", out var st)
+            ? st.GetString() ?? string.Empty
+            : string.Empty;
+    }
+
+    private async Task<JsonDocument> GetPayPalCaptureJsonAsync(
+        string captureId,
+        CancellationToken cancellationToken)
+    {
+        var token = await GetAccessTokenAsync(cancellationToken);
+        var client = _httpFactory.CreateClient(HttpClientName);
+        using var req = new HttpRequestMessage(
+            HttpMethod.Get,
+            "v2/payments/captures/" + Uri.EscapeDataString(captureId));
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        using var resp = await client.SendAsync(req, cancellationToken);
+        var text = await resp.Content.ReadAsStringAsync(cancellationToken);
+        if (!resp.IsSuccessStatusCode)
+        {
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "PayPal capture nije dostupan.",
+                new Dictionary<string, string[]> { { "paypal", new[] { text } } });
+        }
+
+        return JsonDocument.Parse(text);
+    }
+
+    private static PayPalCaptureInfo? ExtractCaptureFromCaptureResponse(JsonDocument doc)
     {
         if (!doc.RootElement.TryGetProperty("purchase_units", out var units) || units.ValueKind != JsonValueKind.Array)
             return null;
@@ -681,8 +760,13 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
                 continue;
             foreach (var cap in captures.EnumerateArray())
             {
-                if (cap.TryGetProperty("id", out var id))
-                    return id.GetString();
+                if (!cap.TryGetProperty("id", out var id))
+                    continue;
+                var captureId = id.GetString();
+                if (string.IsNullOrEmpty(captureId))
+                    continue;
+                var status = cap.TryGetProperty("status", out var st) ? st.GetString() ?? string.Empty : string.Empty;
+                return new PayPalCaptureInfo(captureId, status);
             }
         }
 
