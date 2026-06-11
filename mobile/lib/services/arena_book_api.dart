@@ -507,16 +507,6 @@ class ArenaBookApi {
     );
   }
 
-  Future<CoinPurchaseResult> stripeConfirmSandboxPurchase(double coins) async {
-    final intent = await stripeCreateIntent(coins);
-    await stripeConfirmPayment(intent.paymentIntentId);
-    final wallet = await this.wallet();
-    return CoinPurchaseResult(
-      balanceCoins: wallet.balanceCoins,
-      coinsPurchased: intent.coinsToPurchase,
-    );
-  }
-
   Future<StripeIntentResult> stripeCreateIntent(double coins) async {
     final res = await _client.post(
       _uri('/api/me/payments/stripe/create-intent'),
@@ -531,22 +521,33 @@ class ArenaBookApi {
     );
   }
 
-  Future<void> stripeConfirmPayment(String paymentIntentId) async {
+  Future<CoinPurchaseResult> stripeCompletePurchase(String paymentIntentId) async {
     final res = await _client.post(
-      _uri('/api/me/payments/stripe/confirm-sandbox'),
+      _uri('/api/me/payments/stripe/complete'),
       headers: _headers(jsonBody: true),
       body: jsonEncode({'paymentIntentId': paymentIntentId}),
     );
-    if (res.statusCode != 204) {
+    if (res.statusCode != 200) {
       throw _badResponse(res);
     }
+    return CoinPurchaseResult.fromJson(
+      jsonDecode(res.body) as Map<String, dynamic>,
+    );
   }
 
-  Future<PayPalOrderResult> paypalCreateOrder(double coins) async {
+  Future<PayPalOrderResult> paypalCreateOrder(
+    double coins, {
+    required String returnUrl,
+    required String cancelUrl,
+  }) async {
     final res = await _client.post(
       _uri('/api/me/payments/paypal/create-order'),
       headers: _headers(jsonBody: true),
-      body: jsonEncode({'coinsToPurchase': coins}),
+      body: jsonEncode({
+        'coinsToPurchase': coins,
+        'returnUrl': returnUrl,
+        'cancelUrl': cancelUrl,
+      }),
     );
     if (res.statusCode != 200) {
       throw _badResponse(res);
@@ -555,24 +556,17 @@ class ArenaBookApi {
         jsonDecode(res.body) as Map<String, dynamic>);
   }
 
-  Future<void> paypalCapture(String payPalOrderId) async {
+  Future<CoinPurchaseResult> paypalCapture(String payPalOrderId) async {
     final res = await _client.post(
       _uri('/api/me/payments/paypal/capture'),
       headers: _headers(jsonBody: true),
       body: jsonEncode({'payPalOrderId': payPalOrderId}),
     );
-    if (res.statusCode != 204) {
+    if (res.statusCode != 200) {
       throw _badResponse(res);
     }
-  }
-
-  Future<CoinPurchaseResult> paypalConfirmSandbox(double coins) async {
-    final order = await paypalCreateOrder(coins);
-    await paypalCapture(order.payPalOrderId);
-    final wallet = await this.wallet();
-    return CoinPurchaseResult(
-      balanceCoins: wallet.balanceCoins,
-      coinsPurchased: order.coinsToPurchase,
+    return CoinPurchaseResult.fromJson(
+      jsonDecode(res.body) as Map<String, dynamic>,
     );
   }
 

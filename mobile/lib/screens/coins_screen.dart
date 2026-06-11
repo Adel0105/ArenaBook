@@ -3,6 +3,7 @@ import 'package:arena_book_mobile/core/app_theme.dart';
 import 'package:arena_book_mobile/models/coin_models.dart';
 import 'package:arena_book_mobile/services/api_error.dart';
 import 'package:arena_book_mobile/services/arena_book_api.dart';
+import 'package:arena_book_mobile/services/mobile_payment_service.dart';
 import 'package:arena_book_mobile/widgets/app_section.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -25,15 +26,13 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
   CoinWallet? _wallet;
   List<CoinLedgerEntry> _ledger = [];
   final _coinsCtrl = TextEditingController(text: '50');
-  final _cardCtrl = TextEditingController(text: '4242 4242 4242 4242');
-  final _expiryCtrl = TextEditingController(text: '12/34');
-  final _cvcCtrl = TextEditingController(text: '123');
   bool _usePayPal = false;
   bool _acceptedTerms = false;
   bool _loading = true;
   bool _paying = false;
   String? _error;
   static final _fmt = DateFormat('dd.MM.yyyy HH:mm');
+  late final MobilePaymentService _payments = MobilePaymentService(widget.api);
 
   @override
   void initState() {
@@ -65,9 +64,6 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _coinsCtrl.dispose();
-    _cardCtrl.dispose();
-    _expiryCtrl.dispose();
-    _cvcCtrl.dispose();
     super.dispose();
   }
 
@@ -117,15 +113,7 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
   double get _coinsAmount =>
       double.tryParse(_coinsCtrl.text.replaceAll(',', '.')) ?? 0;
 
-  bool get _canPay =>
-      _acceptedTerms && _coinsAmount > 0 && (!_usePayPal && _cardValid || _usePayPal);
-
-  bool get _cardValid {
-    final card = _cardCtrl.text.replaceAll(' ', '');
-    return card.length >= 13 &&
-        _expiryCtrl.text.contains('/') &&
-        _cvcCtrl.text.length >= 3;
-  }
+  bool get _canPay => _acceptedTerms && _coinsAmount > 0;
 
   Future<void> _showSuccessDialog(String message) async {
     if (!mounted) return;
@@ -171,7 +159,7 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
     });
 
     try {
-      final result = await widget.api.stripeConfirmSandboxPurchase(coins);
+      final result = await _payments.payWithStripe(coins);
       if (!mounted) return;
       _applyPurchaseResult(result);
       await _showSuccessDialog(
@@ -182,6 +170,10 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
     } on ApiError catch (e) {
       setState(() => _error = e.message);
       await _showErrorDialog(e.message);
+    } catch (e) {
+      final message = e.toString();
+      setState(() => _error = message);
+      await _showErrorDialog(message);
     } finally {
       if (mounted) {
         setState(() => _paying = false);
@@ -197,7 +189,7 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
     });
 
     try {
-      final result = await widget.api.paypalConfirmSandbox(coins);
+      final result = await _payments.payWithPayPal(coins);
       if (!mounted) return;
       _applyPurchaseResult(result);
       await _showSuccessDialog(
@@ -208,6 +200,10 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
     } on ApiError catch (e) {
       setState(() => _error = e.message);
       await _showErrorDialog(e.message);
+    } catch (e) {
+      final message = e.toString();
+      setState(() => _error = message);
+      await _showErrorDialog(message);
     } finally {
       if (mounted) {
         setState(() => _paying = false);
@@ -281,7 +277,7 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
                 ),
                 AppSection(
                   title: 'Kupovina novčića',
-                  subtitle: 'Stripe PaymentIntent / PayPal narudžba u aplikaciji',
+                  subtitle: 'Stripe PaymentSheet ili PayPal odobrenje',
                   icon: Icons.shopping_cart_outlined,
                   tone: AppSectionTone.neutral,
                   children: [
@@ -301,44 +297,28 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
                           : Icons.credit_card_outlined),
                       title: const Text('PayPal (sandbox)'),
                       subtitle: const Text(
-                          'Simulacija uplate — novčići se dodaju odmah'),
+                          'Preusmjerenje na PayPal, zatim povratak u aplikaciju'),
                       value: _usePayPal,
                       onChanged: (v) => setState(() => _usePayPal = v),
                     ),
-                    if (!_usePayPal) ...[
+                    if (!_usePayPal)
                       const ListTile(
                         dense: true,
                         leading: Icon(Icons.info_outline),
-                        title: Text('Testna kartica (Stripe sandbox)'),
+                        title: Text('Stripe PaymentSheet'),
                         subtitle: Text(
-                          '4242 4242 4242 4242 · 12/34 · CVC 123\n'
-                          'Korak 1: PaymentIntent · Korak 2: potvrda u sandboxu.',
+                          'Službeni Stripe SDK u aplikaciji.\n'
+                          'Test kartica: 4242 4242 4242 4242.',
                         ),
-                      ),
-                      TextField(
-                        controller: _cardCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'Broj kartice',
-                          prefixIcon: Icon(Icons.credit_card),
-                        ),
-                        keyboardType: TextInputType.number,
-                      ),
-                      TextField(
-                        controller: _expiryCtrl,
-                        decoration: const InputDecoration(labelText: 'MM/GG'),
-                      ),
-                      TextField(
-                        controller: _cvcCtrl,
-                        decoration: const InputDecoration(labelText: 'CVC'),
-                        obscureText: true,
-                      ),
-                    ] else
+                      )
+                    else
                       const ListTile(
                         dense: true,
                         leading: Icon(Icons.info_outline),
                         title: Text('PayPal sandbox'),
                         subtitle: Text(
-                          'Korak 1: kreiranje narudžbe · Korak 2: capture u sandboxu.',
+                          'Otvara se PayPal za odobrenje. Nakon potvrde '
+                          'vraćate se u aplikaciju (deep link).',
                         ),
                       ),
                     CheckboxListTile(
@@ -398,4 +378,3 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
     );
   }
 }
-

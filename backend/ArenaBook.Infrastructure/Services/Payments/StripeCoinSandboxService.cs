@@ -35,6 +35,7 @@ public sealed class StripeCoinSandboxService : IStripeCoinSandboxService
     private readonly ICoinPurchaseFinalizer _coinPurchaseFinalizer;
     private readonly IValidator<CreateCoinPurchaseIntentRequest> _createValidator;
     private readonly IValidator<ConfirmStripeSandboxCoinPurchaseRequest> _confirmCoinPurchaseValidator;
+    private readonly IValidator<CompleteStripePaymentRequest> _completePaymentValidator;
     private readonly IHostEnvironment _env;
     private readonly ILogger<StripeCoinSandboxService> _logger;
 
@@ -46,6 +47,7 @@ public sealed class StripeCoinSandboxService : IStripeCoinSandboxService
         ICoinPurchaseFinalizer coinPurchaseFinalizer,
         IValidator<CreateCoinPurchaseIntentRequest> createValidator,
         IValidator<ConfirmStripeSandboxCoinPurchaseRequest> confirmCoinPurchaseValidator,
+        IValidator<CompleteStripePaymentRequest> completePaymentValidator,
         IHostEnvironment env,
         ILogger<StripeCoinSandboxService> logger)
     {
@@ -56,6 +58,7 @@ public sealed class StripeCoinSandboxService : IStripeCoinSandboxService
         _coinPurchaseFinalizer = coinPurchaseFinalizer;
         _createValidator = createValidator;
         _confirmCoinPurchaseValidator = confirmCoinPurchaseValidator;
+        _completePaymentValidator = completePaymentValidator;
         _env = env;
         _logger = logger;
         StripeConfiguration.ApiKey = _stripe.SecretKey;
@@ -116,6 +119,7 @@ public sealed class StripeCoinSandboxService : IStripeCoinSandboxService
                         AmountMoney = existing.AmountMoney,
                         Currency = existing.Currency,
                         CoinsToPurchase = existing.CoinsPurchased,
+                        PublishableKey = _stripe.PublishableKey,
                     };
                 }
             }
@@ -189,6 +193,78 @@ public sealed class StripeCoinSandboxService : IStripeCoinSandboxService
             AmountMoney = money,
             Currency = PurchaseCurrency,
             CoinsToPurchase = request.CoinsToPurchase,
+            PublishableKey = _stripe.PublishableKey,
+        };
+    }
+
+    public async Task<CoinPurchaseResultResponse> CompletePaymentAsync(
+        string userId,
+        CompleteStripePaymentRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(_stripe.SecretKey))
+            throw new InvalidOperationException("Stripe nije konfigurisan (Stripe__SecretKey).");
+
+        var validation = await _completePaymentValidator.ValidateAsync(request, cancellationToken);
+        if (!validation.IsValid)
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "Validacija nije prošla.",
+                validation.ToErrorDictionary());
+
+        var paymentIntentId = request.PaymentIntentId.Trim();
+        var pendingId = await StatusIdByCodeAsync("PENDING", cancellationToken);
+        var completedId = await StatusIdByCodeAsync("COMPLETED", cancellationToken);
+
+        var payment = await _db.ExternalPaymentRecords
+            .FirstOrDefaultAsync(
+                x => x.UserId == userId && x.ExternalReference == paymentIntentId && x.Provider == "Stripe",
+                cancellationToken);
+        if (payment is null)
+            throw new NotFoundException("Uplata nije pronađena.");
+
+        if (payment.PaymentProcessingStatusId == completedId)
+        {
+            var balance = await _db.UserCoinWallets.AsNoTracking()
+                .Where(w => w.UserId == userId)
+                .Select(w => w.BalanceCoins)
+                .FirstOrDefaultAsync(cancellationToken);
+            return new CoinPurchaseResultResponse
+            {
+                BalanceCoins = balance,
+                CoinsPurchased = payment.CoinsPurchased,
+            };
+        }
+
+        if (payment.PaymentProcessingStatusId != pendingId)
+            throw new ConflictException("Uplata nije u statusu čekanja.");
+
+        var piService = new PaymentIntentService();
+        PaymentIntent pi;
+        try
+        {
+            pi = await piService.GetAsync(paymentIntentId, cancellationToken: cancellationToken);
+        }
+        catch (StripeException ex)
+        {
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "Stripe nije vratio PaymentIntent.",
+                new Dictionary<string, string[]> { ["stripe"] = [ex.Message] });
+        }
+
+        if (!string.Equals(pi.Status, "succeeded", StringComparison.OrdinalIgnoreCase))
+            throw new ConflictException($"Plaćanje nije uspjelo (status: {pi.Status}).");
+
+        var finalized = await _coinPurchaseFinalizer.FinalizeCoinPurchaseAsync(
+            payment.Id,
+            pi.Id,
+            cancellationToken: cancellationToken);
+        if (!finalized.Credited && !finalized.AlreadyCompleted)
+            throw new ConflictException("Uplata nije mogla biti završena.");
+
+        return new CoinPurchaseResultResponse
+        {
+            BalanceCoins = finalized.BalanceCoins,
+            CoinsPurchased = finalized.CoinsPurchased,
         };
     }
 

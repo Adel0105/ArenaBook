@@ -22,5 +22,10 @@ public interface IStripeCoinSandboxService
         string userId,
         ConfirmStripeSandboxCoinPurchaseRequest request,
         CancellationToken cancellationToken = default);
+
+    Task<CoinPurchaseResultResponse> CompletePaymentAsync(
+        string userId,
+        CompleteStripePaymentRequest request,
+        CancellationToken cancellationToken = default);
 }
 

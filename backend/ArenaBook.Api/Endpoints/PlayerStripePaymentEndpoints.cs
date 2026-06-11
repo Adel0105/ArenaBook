@@ -14,6 +14,7 @@ public static class PlayerStripePaymentEndpoints
             .WithTags("Payments - Me (Stripe sandbox)");
 
         group.MapPost("/create-intent", CreateIntentAsync);
+        group.MapPost("/complete", CompleteAsync);
         group.MapPost("/confirm-sandbox", ConfirmSandboxAsync);
         group.MapPost("/purchase-sandbox", PurchaseSandboxAsync);
         group.MapPost("/refund", RefundAsync);
@@ -36,6 +37,16 @@ public static class PlayerStripePaymentEndpoints
         CancellationToken cancellationToken)
     {
         return service.CreateCoinPurchaseIntentAsync(RequireUserId(user), request, cancellationToken);
+    }
+
+    private static async Task<IResult> CompleteAsync(
+        ClaimsPrincipal user,
+        IStripeCoinSandboxService service,
+        CompleteStripePaymentRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = await service.CompletePaymentAsync(RequireUserId(user), request, cancellationToken);
+        return Results.Ok(result);
     }
 
     private static async Task<IResult> ConfirmSandboxAsync(

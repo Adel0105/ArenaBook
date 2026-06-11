@@ -213,7 +213,7 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         };
     }
 
-    public async Task CaptureCoinPurchaseOrderAsync(
+    public async Task<CoinPurchaseResultResponse> CaptureCoinPurchaseOrderAsync(
         string userId,
         CapturePayPalOrderRequest request,
         CancellationToken cancellationToken = default)
@@ -252,6 +252,12 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         var finalized = await FinalizePayPalCaptureAsync(payment.Id, captureId, null, cancellationToken);
         if (!finalized.Credited && !finalized.AlreadyCompleted)
             throw new ConflictException("Uplata je već obrađena.");
+
+        return new CoinPurchaseResultResponse
+        {
+            BalanceCoins = finalized.BalanceCoins,
+            CoinsPurchased = finalized.CoinsPurchased,
+        };
     }
 
     public async Task<CoinPurchaseResultResponse> ConfirmSandboxPurchaseAsync(

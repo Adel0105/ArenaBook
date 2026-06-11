@@ -64,12 +64,14 @@ class StripeIntentResult {
     required this.paymentIntentId,
     required this.amountMoney,
     required this.coinsToPurchase,
+    required this.publishableKey,
   });
 
   final String clientSecret;
   final String paymentIntentId;
   final double amountMoney;
   final double coinsToPurchase;
+  final String publishableKey;
 
   factory StripeIntentResult.fromJson(Map<String, dynamic> json) {
     return StripeIntentResult(
@@ -77,6 +79,7 @@ class StripeIntentResult {
       paymentIntentId: json['paymentIntentId'] as String? ?? '',
       amountMoney: (json['amountMoney'] as num?)?.toDouble() ?? 0,
       coinsToPurchase: (json['coinsToPurchase'] as num?)?.toDouble() ?? 0,
+      publishableKey: json['publishableKey'] as String? ?? '',
     );
   }
 }

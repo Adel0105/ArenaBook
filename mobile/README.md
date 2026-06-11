@@ -14,7 +14,7 @@ URL se prosljeđuje preko `dart-define` (bez hardkoda u kodu):
 ```powershell
 cd mobile
 flutter pub get
-flutter run --dart-define=API_BASE_URL=http://10.0.2.2:5000
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:5000 --dart-define=STRIPE_PUBLISHABLE_KEY=pk_test_...
 ```
 
 | Okruženje | Tipičan `API_BASE_URL` |
@@ -34,7 +34,7 @@ Za lokalni API bez HTTPS-a, u `android/app/src/main/AndroidManifest.xml` na `<ap
 1. **Registracija** — ime, prezime, e-mail, **obavezan datum rođenja**, lozinka.
 2. **Dvorane** — pretraga, filter po gradu, detalj, termini, recenzije.
 3. **Termini** — kalendar, pridruživanje (javni/privatni + kod), plaćanje koinima.
-4. **Koini** — Stripe sandbox (kartica + `confirm-sandbox` u Development) ili PayPal (preusmjerenje + capture).
+4. **Koini** — Stripe **PaymentSheet** (`flutter_stripe`) + `POST /complete` nakon uspjeha; PayPal otvara **approval URL** u pregledniku i vraća se u app preko deep linka `arenabook://paypal/return`, zatim `capture`.
 5. **Preporuke** — CF na početnoj i posebnom ekranu s objašnjenjem.
 6. **Profil** — uređivanje, promjena lozinke, historija rezervacija.
 7. **Reset lozinke** — forgot/reset. U produkciji token stiže e-mailom (SMTP + Worker). U Development bez SMTP-a API vraća `resetToken` u odgovoru za lokalni test.

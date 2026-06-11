@@ -44,8 +44,8 @@ public static class PlayerPayPalPaymentEndpoints
         CapturePayPalOrderRequest request,
         CancellationToken cancellationToken)
     {
-        await service.CaptureCoinPurchaseOrderAsync(RequireUserId(user), request, cancellationToken);
-        return Results.NoContent();
+        var result = await service.CaptureCoinPurchaseOrderAsync(RequireUserId(user), request, cancellationToken);
+        return Results.Ok(result);
     }
 
     private static async Task<IResult> ConfirmSandboxAsync(
