@@ -108,7 +108,13 @@ public static class ArenaBookAuthEndpoints
         if (string.IsNullOrEmpty(id))
             return Results.Unauthorized();
 
-        await authService.ChangePasswordAsync(id, body, cancellationToken);
+        var jti = user.FindFirstValue(JwtRegisteredClaimNames.Jti);
+        var expRaw = user.FindFirstValue(JwtRegisteredClaimNames.Exp);
+        DateTime? expiresUtc = null;
+        if (!string.IsNullOrEmpty(expRaw) && long.TryParse(expRaw, out var expSeconds))
+            expiresUtc = DateTimeOffset.FromUnixTimeSeconds(expSeconds).UtcDateTime;
+
+        await authService.ChangePasswordAsync(id, body, jti, expiresUtc, cancellationToken);
         return Results.NoContent();
     }
 

@@ -179,6 +179,8 @@ public sealed class AuthService : IAuthService
     public async Task ChangePasswordAsync(
         string userId,
         ChangePasswordRequest request,
+        string? currentJwtId = null,
+        DateTime? currentTokenExpiresUtc = null,
         CancellationToken cancellationToken = default)
     {
         var validation = await _changePasswordValidator.ValidateAsync(request, cancellationToken);
@@ -196,6 +198,8 @@ public sealed class AuthService : IAuthService
             throw new ArenaBook.Application.Common.Exceptions.ValidationException(
                 "Lozinka nije promijenjena.",
                 result.Errors.GroupBy(e => e.Code).ToDictionary(g => g.Key, g => g.Select(e => e.Description).ToArray()));
+
+        await InvalidateUserAccessTokensAsync(user, currentJwtId, currentTokenExpiresUtc, cancellationToken);
     }
 
     public async Task<string?> RequestPasswordResetAsync(
@@ -234,6 +238,8 @@ public sealed class AuthService : IAuthService
             throw new ArenaBook.Application.Common.Exceptions.ValidationException(
                 "Reset nije uspio.",
                 result.Errors.GroupBy(e => e.Code).ToDictionary(g => g.Key, g => g.Select(e => e.Description).ToArray()));
+
+        await InvalidateUserAccessTokensAsync(user, currentJwtId: null, currentTokenExpiresUtc: null, cancellationToken);
     }
 
     public Task LogoutAsync(string? jwtId, DateTime? expiresUtc, CancellationToken cancellationToken = default)
@@ -242,6 +248,16 @@ public sealed class AuthService : IAuthService
             return Task.CompletedTask;
 
         return _jwtTokenRevocationService.RevokeAsync(jwtId, expiresUtc.Value, cancellationToken);
+    }
+
+    private async Task InvalidateUserAccessTokensAsync(
+        ApplicationUser user,
+        string? currentJwtId,
+        DateTime? currentTokenExpiresUtc,
+        CancellationToken cancellationToken)
+    {
+        await _userManager.UpdateSecurityStampAsync(user);
+        await LogoutAsync(currentJwtId, currentTokenExpiresUtc, cancellationToken);
     }
 }
 
