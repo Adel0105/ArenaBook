@@ -22,6 +22,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
 {
     private const string MaxParticipantsKey = "Platform.Session.MaxParticipantsPerSession";
     private const string MinSessionPriceKey = "Platform.Session.MinSessionPriceCoins";
+    private const string AdminDeleteReason = "Administrator je obrisao termin.";
 
     private readonly ArenaBookDbContext _db;
     private readonly UserManager<ApplicationUser> _userManager;
@@ -29,6 +30,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
     private readonly IValidator<CreateScheduledSessionRequest> _createValidator;
     private readonly IValidator<UpdateScheduledSessionRequest> _updateValidator;
     private readonly IValidator<JoinScheduledSessionRequest> _joinValidator;
+    private readonly IValidator<CancelScheduledSessionRequest> _cancelValidator;
 
     public ScheduledSessionService(
         ArenaBookDbContext db,
@@ -36,7 +38,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         ISessionOrganizerRoleService organizerRoleService,
         IValidator<CreateScheduledSessionRequest> createValidator,
         IValidator<UpdateScheduledSessionRequest> updateValidator,
-        IValidator<JoinScheduledSessionRequest> joinValidator)
+        IValidator<JoinScheduledSessionRequest> joinValidator,
+        IValidator<CancelScheduledSessionRequest> cancelValidator)
     {
         _db = db;
         _userManager = userManager;
@@ -44,6 +47,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         _createValidator = createValidator;
         _updateValidator = updateValidator;
         _joinValidator = joinValidator;
+        _cancelValidator = cancelValidator;
     }
 
     public async Task<PagedListResponse<ScheduledSessionListItemResponse>> GetPagedAsync(
@@ -530,16 +534,15 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (!isAdministrator && entity.OrganizerUserId != userId)
             throw new BusinessRuleException("Nemate pravo potvrde ovog termina.", Err());
 
-        var pendingId = await LifecycleIdAsync("PENDING", cancellationToken);
-        var confirmedId = await LifecycleIdAsync("CONFIRMED", cancellationToken);
-        if (entity.SessionLifecycleStatusId != pendingId)
-            throw new ConflictException("Samo termin na čekanju može biti potvrđen.");
-
-        var prev = entity.SessionLifecycleStatusId;
-        entity.SessionLifecycleStatusId = confirmedId;
-        AppendAudit(id, userId, ScheduledSessionAuditActions.Confirmed, prev, confirmedId, null);
-        await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, userId, isAdministrator, cancellationToken);
+        return await ApplyLifecycleTransitionAsync(
+            entity,
+            id,
+            userId,
+            isAdministrator,
+            ScheduledSessionLifecycleAction.Confirm,
+            ScheduledSessionAuditActions.Confirmed,
+            cancelReason: null,
+            cancellationToken);
     }
 
     public async Task<ScheduledSessionDetailsResponse> CancelAsync(
@@ -549,20 +552,29 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         bool isAdministrator,
         CancellationToken cancellationToken = default)
     {
+        var validation = await _cancelValidator.ValidateAsync(request, cancellationToken);
+        if (!validation.IsValid)
+        {
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "Validacija nije prošla.",
+                validation.ToErrorDictionary());
+        }
+
         var entity = await _db.ScheduledSessions.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
         if (entity is null)
             throw new NotFoundException("Termin nije pronađen.");
         if (!isAdministrator && entity.OrganizerUserId != userId)
             throw new BusinessRuleException("Nemate pravo otkazivanja ovog termina.", Err());
 
-        var reason = string.IsNullOrWhiteSpace(request.Reason) ? null : request.Reason.Trim();
-        return await TransitionToCancelledAsync(
+        var reason = request.Reason.Trim();
+        return await ApplyLifecycleTransitionAsync(
             entity,
             id,
             userId,
             isAdministrator,
+            ScheduledSessionLifecycleAction.Cancel,
             ScheduledSessionAuditActions.Cancelled,
-            reason,
+            cancelReason: reason,
             cancellationToken);
     }
 
@@ -578,22 +590,15 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (!isAdministrator && entity.OrganizerUserId != userId)
             throw new BusinessRuleException("Nemate pravo završetka ovog termina.", Err());
 
-        var confirmedId = await LifecycleIdAsync("CONFIRMED", cancellationToken);
-        var completedId = await LifecycleIdAsync("COMPLETED", cancellationToken);
-        if (entity.SessionLifecycleStatusId != confirmedId)
-            throw new ConflictException("Samo potvrđen termin može biti označen kao završen.");
-
-        if (!SessionTimeRules.CanMarkCompleted(entity.EndUtc, DateTime.UtcNow))
-        {
-            throw new ConflictException(
-                "Termin se može označiti kao završen tek nakon planiranog kraja (EndUtc).");
-        }
-
-        var prev = entity.SessionLifecycleStatusId;
-        entity.SessionLifecycleStatusId = completedId;
-        AppendAudit(id, userId, ScheduledSessionAuditActions.Completed, prev, completedId, null);
-        await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, userId, isAdministrator, cancellationToken);
+        return await ApplyLifecycleTransitionAsync(
+            entity,
+            id,
+            userId,
+            isAdministrator,
+            ScheduledSessionLifecycleAction.Complete,
+            ScheduledSessionAuditActions.Completed,
+            cancelReason: null,
+            cancellationToken);
     }
 
     public async Task DeleteAsync(int id, string actorUserId, CancellationToken cancellationToken = default)
@@ -602,13 +607,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (entity is null)
             throw new NotFoundException("Termin nije pronađen.");
 
-        await TransitionToCancelledAsync(
+        await ApplyLifecycleTransitionAsync(
             entity,
             id,
             actorUserId,
             isAdministrator: true,
+            ScheduledSessionLifecycleAction.AdminDelete,
             ScheduledSessionAuditActions.Deleted,
-            null,
+            cancelReason: AdminDeleteReason,
             cancellationToken);
     }
 
@@ -710,33 +716,45 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         await _db.SaveChangesAsync(cancellationToken);
     }
 
-    private async Task<ScheduledSessionDetailsResponse> TransitionToCancelledAsync(
+    private async Task<ScheduledSessionDetailsResponse> ApplyLifecycleTransitionAsync(
         ScheduledSession entity,
-        int id,
+        int sessionId,
         string actorUserId,
         bool isAdministrator,
+        ScheduledSessionLifecycleAction action,
         string auditAction,
         string? cancelReason,
         CancellationToken cancellationToken)
     {
-        var cancelledId = await LifecycleIdAsync("CANCELLED", cancellationToken);
-        var completedId = await LifecycleIdAsync("COMPLETED", cancellationToken);
-        if (entity.SessionLifecycleStatusId == cancelledId || entity.SessionLifecycleStatusId == completedId)
-            throw new ConflictException("Termin je već završen ili otkazan.");
+        var fromCode = await LifecycleCodeByIdAsync(entity.SessionLifecycleStatusId, cancellationToken);
+        var plan = ScheduledSessionLifecycleStateMachine.Plan(
+            fromCode,
+            action,
+            entity.EndUtc,
+            DateTime.UtcNow,
+            cancelReason);
 
+        var targetId = await LifecycleIdAsync(plan.TargetStatusCode, cancellationToken);
         var prev = entity.SessionLifecycleStatusId;
-        await RefundParticipantsAsync(id, cancellationToken);
 
-        entity.SessionLifecycleStatusId = cancelledId;
-        AppendAudit(
-            id,
-            actorUserId,
-            auditAction,
-            prev,
-            cancelledId,
-            SerializeDetails(new { refundsProcessed = true, cancelReason }));
+        if (plan.RefundParticipants)
+            await RefundParticipantsAsync(sessionId, cancellationToken);
+
+        entity.SessionLifecycleStatusId = targetId;
+
+        string? auditJson = null;
+        if (action is ScheduledSessionLifecycleAction.Cancel or ScheduledSessionLifecycleAction.AdminDelete)
+        {
+            auditJson = SerializeDetails(new
+            {
+                refundsProcessed = plan.RefundParticipants,
+                cancelReason = cancelReason?.Trim(),
+            });
+        }
+
+        AppendAudit(sessionId, actorUserId, auditAction, prev, targetId, auditJson);
         await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, actorUserId, isAdministrator, cancellationToken);
+        return await GetByIdAsync(sessionId, actorUserId, isAdministrator, cancellationToken);
     }
 
     private async Task RefundParticipantsAsync(int sessionId, CancellationToken cancellationToken)
@@ -820,6 +838,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         return await _db.SessionLifecycleStatuses.AsNoTracking()
             .Where(x => x.Code == code)
             .Select(x => x.Id)
+            .FirstAsync(cancellationToken);
+    }
+
+    private async Task<string> LifecycleCodeByIdAsync(int statusId, CancellationToken cancellationToken)
+    {
+        return await _db.SessionLifecycleStatuses.AsNoTracking()
+            .Where(x => x.Id == statusId)
+            .Select(x => x.Code)
             .FirstAsync(cancellationToken);
     }
 
