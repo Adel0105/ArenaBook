@@ -229,7 +229,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   AppSection(
                     title: 'Preporučene dvorane',
-                    subtitle: 'Iz vašeg grada, rangirane po ocjenama i lajkovima',
+                    subtitle: 'Iz vašeg grada, personalizirano (CF) po sličnim igračima',
                     icon: Icons.recommend_outlined,
                     tone: AppSectionTone.mint,
                     action: TextButton(

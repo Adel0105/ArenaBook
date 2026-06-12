@@ -12,6 +12,10 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
     private const int StarPoints = 1;
     private const int CommentPoints = 1;
 
+    private const double ParticipationPreferenceWeight = 4.0;
+    private const double LikePreferenceWeight = 5.0;
+    private const double DislikePreferenceWeight = 1.0;
+
     private readonly ArenaBookDbContext _db;
 
     public CollaborativeFilteringRecommendationService(ArenaBookDbContext db)
@@ -53,13 +57,38 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
             })
             .ToListAsync(cancellationToken);
 
-        return halls
+        if (halls.Count == 0)
+            return [];
+
+        var interactions = await LoadCityInteractionsAsync(effectiveCityId.Value, cancellationToken);
+        var matrix = CollaborativeFilteringEngine.BuildUserHallMatrix(interactions);
+        var neighbors = CollaborativeFilteringEngine.FindSimilarUsers(userId, matrix);
+        var prediction = CollaborativeFilteringEngine.PredictHallScores(
+            userId,
+            matrix,
+            neighbors,
+            halls.Select(h => h.Id));
+
+        var maxEngagement = halls.Max(ComputeEngagementScore);
+        if (maxEngagement <= 0)
+            maxEngagement = 1;
+
+        var ranked = halls
             .Select(h =>
             {
-                var score = ComputeEngagementScore(h);
+                var engagement = ComputeEngagementScore(h);
+                var popularity = CollaborativeFilteringEngine.NormalizePopularityScore(engagement, maxEngagement);
+                var collaborative = prediction.Scores.GetValueOrDefault(h.Id, 0);
+                var finalScore = CollaborativeFilteringEngine.BlendScores(
+                    collaborative,
+                    popularity,
+                    prediction.SimilarUserCount,
+                    prediction.HasUserProfile);
+
                 var averageRating = h.ReviewCount > 0
                     ? (double)h.StarPoints / h.ReviewCount
                     : 0;
+
                 return new RecommendedHallResponse
                 {
                     HallId = h.Id,
@@ -70,8 +99,16 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
                     AverageRating = averageRating,
                     ReviewCount = h.ReviewCount,
                     IsActive = h.IsActive,
-                    Score = score,
-                    Explanation = BuildHallExplanation(cityName, h, score),
+                    Score = finalScore,
+                    Explanation = BuildHallExplanation(
+                        cityName,
+                        h,
+                        finalScore,
+                        collaborative,
+                        popularity,
+                        prediction.SimilarUserCount,
+                        prediction.HasUserProfile,
+                        averageRating),
                 };
             })
             .OrderByDescending(h => h.Score)
@@ -79,6 +116,8 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
             .ThenBy(h => h.Name)
             .Take(take)
             .ToList();
+
+        return ranked;
     }
 
     public async Task<IReadOnlyList<RecommendedSessionResponse>> GetRecommendedSessionsAsync(
@@ -92,7 +131,7 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
         if (!effectiveCityId.HasValue)
             return [];
 
-        var hallScores = await GetHallScoreMapAsync(effectiveCityId.Value, cancellationToken);
+        var hallScores = await GetPersonalizedHallScoreMapAsync(userId, effectiveCityId.Value, cancellationToken);
 
         var confirmedId = await _db.SessionLifecycleStatuses.AsNoTracking()
             .Where(s => s.Code == "CONFIRMED")
@@ -151,7 +190,7 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
                     OrganizerEmail = s.OrganizerEmail,
                     Score = hallScore,
                     Explanation = hallScore > 0
-                        ? $"Termin u dvorani iz {s.CityName} s visokim brojem bodova ({hallScore:F0}) na osnovu ocjena i lajkova."
+                        ? $"Termin u dvorani iz {s.CityName} — personalizirani CF skor dvorane {hallScore:F1} (rezervacije, ocjene i reakcije sličnih igrača)."
                         : $"Termin u dvorani iz {s.CityName} — organizovan od strane drugih igrača.",
                 };
             })
@@ -166,19 +205,26 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
         int? cityId,
         CancellationToken cancellationToken)
     {
-        var profileCityId = await _db.Users.AsNoTracking()
+        if (cityId.HasValue)
+        {
+            var cityExists = await _db.Cities.AsNoTracking()
+                .AnyAsync(c => c.Id == cityId.Value, cancellationToken);
+            if (cityExists)
+                return cityId.Value;
+        }
+
+        return await _db.Users.AsNoTracking()
             .Where(u => u.Id == userId)
             .Select(u => u.CityId)
             .FirstOrDefaultAsync(cancellationToken);
-
-        return profileCityId ?? cityId;
     }
 
-    private async Task<Dictionary<int, double>> GetHallScoreMapAsync(
+    private async Task<Dictionary<int, double>> GetPersonalizedHallScoreMapAsync(
+        string userId,
         int cityId,
         CancellationToken cancellationToken)
     {
-        var rows = await _db.Halls.AsNoTracking()
+        var halls = await _db.Halls.AsNoTracking()
             .Where(h => h.IsActive && h.CityId == cityId)
             .Select(h => new HallEngagementRow
             {
@@ -190,7 +236,72 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
             })
             .ToListAsync(cancellationToken);
 
-        return rows.ToDictionary(r => r.Id, ComputeEngagementScore);
+        if (halls.Count == 0)
+            return [];
+
+        var interactions = await LoadCityInteractionsAsync(cityId, cancellationToken);
+        var matrix = CollaborativeFilteringEngine.BuildUserHallMatrix(interactions);
+        var neighbors = CollaborativeFilteringEngine.FindSimilarUsers(userId, matrix);
+        var prediction = CollaborativeFilteringEngine.PredictHallScores(
+            userId,
+            matrix,
+            neighbors,
+            halls.Select(h => h.Id));
+
+        var maxEngagement = halls.Max(ComputeEngagementScore);
+        if (maxEngagement <= 0)
+            maxEngagement = 1;
+
+        return halls.ToDictionary(
+            h => h.Id,
+            h =>
+            {
+                var popularity = CollaborativeFilteringEngine.NormalizePopularityScore(
+                    ComputeEngagementScore(h),
+                    maxEngagement);
+                var collaborative = prediction.Scores.GetValueOrDefault(h.Id, 0);
+                return CollaborativeFilteringEngine.BlendScores(
+                    collaborative,
+                    popularity,
+                    prediction.SimilarUserCount,
+                    prediction.HasUserProfile);
+            });
+    }
+
+    private async Task<IReadOnlyList<CollaborativeFilteringEngine.Interaction>> LoadCityInteractionsAsync(
+        int cityId,
+        CancellationToken cancellationToken)
+    {
+        var reviews = await _db.HallReviews.AsNoTracking()
+            .Where(r => r.Hall.CityId == cityId && r.Hall.IsActive)
+            .Select(r => new CollaborativeFilteringEngine.Interaction(
+                r.UserId,
+                r.HallId,
+                r.RatingStars))
+            .ToListAsync(cancellationToken);
+
+        var reactions = await _db.HallReactions.AsNoTracking()
+            .Where(r => r.Hall.CityId == cityId && r.Hall.IsActive)
+            .Select(r => new CollaborativeFilteringEngine.Interaction(
+                r.UserId,
+                r.HallId,
+                r.IsLike ? LikePreferenceWeight : DislikePreferenceWeight))
+            .ToListAsync(cancellationToken);
+
+        var participations = await _db.ScheduledSessionParticipants.AsNoTracking()
+            .Where(p => p.ScheduledSession.Hall.CityId == cityId && p.ScheduledSession.Hall.IsActive)
+            .Select(p => new CollaborativeFilteringEngine.Interaction(
+                p.UserId,
+                p.ScheduledSession.HallId,
+                ParticipationPreferenceWeight))
+            .ToListAsync(cancellationToken);
+
+        var merged = new List<CollaborativeFilteringEngine.Interaction>(
+            reviews.Count + reactions.Count + participations.Count);
+        merged.AddRange(reviews);
+        merged.AddRange(reactions);
+        merged.AddRange(participations);
+        return merged;
     }
 
     private static double ComputeEngagementScore(HallEngagementRow row) =>
@@ -199,10 +310,43 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
         + row.StarPoints * StarPoints
         + row.CommentCount * CommentPoints;
 
-    private static string BuildHallExplanation(string cityName, HallEngagementRow row, double score) =>
-        $"Dvorana u gradu {cityName}. Bodovi: {score:F0} " +
-        $"(👍 {row.LikeCount}×{LikePoints}, 👎 {row.DislikeCount}×{DislikePoints}, " +
-        $"★ {row.StarPoints}×{StarPoints}, 💬 {row.CommentCount}×{CommentPoints}).";
+    private static string BuildHallExplanation(
+        string cityName,
+        HallEngagementRow row,
+        double finalScore,
+        double collaborativeScore,
+        double popularityScore,
+        int similarUserCount,
+        bool hasUserProfile,
+        double averageRating)
+    {
+        if (hasUserProfile && similarUserCount > 0 && collaborativeScore > 0)
+        {
+            return
+                $"Dvorana u gradu {cityName}. Personalizirani CF skor {finalScore:F1} " +
+                $"(predviđanje {collaborativeScore:F1} na osnovu {similarUserCount} sličnih igrača " +
+                $"po rezervacijama, recenzijama i reakcijama; popularnost u gradu {popularityScore:F1}).";
+        }
+
+        if (hasUserProfile && similarUserCount > 0)
+        {
+            return
+                $"Dvorana u gradu {cityName}. Skor {finalScore:F1} — preporuka iz susjedstva od {similarUserCount} " +
+                $"sličnih igrača (kosinusna sličnost); popularnost u gradu {popularityScore:F1}.";
+        }
+
+        if (hasUserProfile)
+        {
+            return
+                $"Dvorana u gradu {cityName}. Skor {finalScore:F1} — još nema dovoljno sličnih igrača za CF; " +
+                $"rangirano prema popularnosti (★ {averageRating:F1}, {row.ReviewCount} recenzija).";
+        }
+
+        return
+            $"Dvorana u gradu {cityName}. Popularnost {finalScore:F1} " +
+            $"(👍 {row.LikeCount}, 👎 {row.DislikeCount}, ★ {averageRating:F1}, {row.ReviewCount} recenzija). " +
+            "Personalizacija raste nakon vaših rezervacija, ocjena i reakcija.";
+    }
 
     private sealed class HallEngagementRow
     {
@@ -219,4 +363,3 @@ public sealed class CollaborativeFilteringRecommendationService : IRecommendatio
         public int ReviewCount { get; init; }
     }
 }
-

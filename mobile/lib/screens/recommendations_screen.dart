@@ -57,10 +57,10 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
   @override
   Widget build(BuildContext context) {
     final cityHint = _cityLabel != null
-        ? 'Preporuke za grad $_cityLabel — rangirano po ocjenama, komentarima i lajkovima.'
+        ? 'Preporuke za grad $_cityLabel — personalizirano (CF) prema rezervacijama, ocjenama i reakcijama sličnih igrača.'
         : widget.user.cityId == null
-            ? 'Postavite grad u profilu da biste vidjeli personalizirane preporuke.'
-            : 'Nema preporuka za vaš grad.';
+            ? 'Postavite grad u profilu ili pošaljite cityId za personalizirane preporuke.'
+            : 'Nema preporuka za odabrani grad.';
 
     return DefaultTabController(
       length: 2,
