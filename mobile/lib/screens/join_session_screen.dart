@@ -15,6 +15,7 @@ import 'package:arena_book_mobile/services/arena_book_api.dart';
 import 'package:arena_book_mobile/widgets/app_section.dart';
 
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 class JoinSessionScreen extends StatefulWidget {
   const JoinSessionScreen(
@@ -42,6 +43,10 @@ class _JoinSessionScreenState extends State<JoinSessionScreen> {
   bool _joining = false;
 
   String? _error;
+  String? _inviteError;
+  String? _termsError;
+  String? _balanceError;
+  static final _fmt = DateFormat('dd.MM.yyyy HH:mm');
 
   @override
   void initState() {
@@ -83,6 +88,93 @@ class _JoinSessionScreenState extends State<JoinSessionScreen> {
         });
       }
     }
+  }
+
+  String? _validateInviteCode() {
+    if (widget.session.sessionKindCode != 'INVITE') {
+      return null;
+    }
+    final code = _inviteCtrl.text.trim();
+    if (code.isEmpty) {
+      return 'Unesite kod poziva za privatni termin.';
+    }
+    if (code.length < 4) {
+      return 'Kod poziva mora imati najmanje 4 znaka.';
+    }
+    return null;
+  }
+
+  String? _validateTerms() {
+    if (!_acceptedTerms) {
+      return 'Morate prihvatiti uslove korištenja prije rezervacije.';
+    }
+    return null;
+  }
+
+  String? _validateBalance(double cost, double balance) {
+    if (balance < cost) {
+      return 'Nedovoljno novčića na računu. Dokupite novčiće prije rezervacije.';
+    }
+    return null;
+  }
+
+  bool _validateJoinForm(double cost, double balance) {
+    final inviteError = _validateInviteCode();
+    final termsError = _validateTerms();
+    final balanceError = _validateBalance(cost, balance);
+    setState(() {
+      _inviteError = inviteError;
+      _termsError = termsError;
+      _balanceError = balanceError;
+      _error = null;
+    });
+    return inviteError == null && termsError == null && balanceError == null;
+  }
+
+  Future<bool> _confirmJoin(double cost, double balance) async {
+    final startLocal = _fmt.format(widget.session.startUtc.toLocal());
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.event_available_outlined, size: 40),
+        title: const Text('Potvrdite rezervaciju'),
+        content: Text(
+          'Dvorana: ${widget.session.hallName}\n'
+          'Termin: $startLocal\n'
+          'Iznos: ${AppCurrency.format(cost)}\n'
+          'Trenutno stanje: ${AppCurrency.format(balance)}\n\n'
+          'Sa vašeg novčanika bit će skinuto ${AppCurrency.format(cost)}. '
+          'Povrat novčića nije automatski ako kasnije odustanete — moguće je '
+          'samo ako organizator otkaže termin.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Odustani'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Potvrdi i plati'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
+  Future<void> _onJoinPressed() async {
+    final cost = _quote?.coinsRequired ?? widget.session.priceTotalCoins;
+    final balance = _wallet?.balanceCoins ?? 0;
+
+    if (!_validateJoinForm(cost, balance)) {
+      return;
+    }
+
+    if (!await _confirmJoin(cost, balance)) {
+      return;
+    }
+
+    await _joinWithCoins();
   }
 
   Future<void> _joinWithCoins() async {
@@ -149,8 +241,6 @@ class _JoinSessionScreenState extends State<JoinSessionScreen> {
 
     final balance = _wallet?.balanceCoins ?? 0;
 
-    final canPay = balance >= cost && _acceptedTerms;
-
     return Scaffold(
       appBar: AppBar(
         title: const Row(
@@ -174,14 +264,30 @@ class _JoinSessionScreenState extends State<JoinSessionScreen> {
                   Icons.toll_outlined, 'Potrebno', AppCurrency.format(cost)),
               _infoRow(Icons.account_balance_wallet_outlined, 'Stanje',
                   AppCurrency.format(balance)),
+              if (_balanceError != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  _balanceError!,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
               if (widget.session.sessionKindCode == 'INVITE') ...[
                 const SizedBox(height: 8),
                 TextField(
                   controller: _inviteCtrl,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Kod poziva',
-                    prefixIcon: Icon(Icons.vpn_key_outlined),
+                    prefixIcon: const Icon(Icons.vpn_key_outlined),
+                    errorText: _inviteError,
                   ),
+                  onChanged: (_) {
+                    if (_inviteError != null) {
+                      setState(() => _inviteError = _validateInviteCode());
+                    }
+                  },
                 ),
               ],
               if (widget.session.maxAgeYears != null)
@@ -196,15 +302,35 @@ class _JoinSessionScreenState extends State<JoinSessionScreen> {
             children: [
               CheckboxListTile(
                 value: _acceptedTerms,
-                onChanged: (v) => setState(() => _acceptedTerms = v ?? false),
+                onChanged: (v) => setState(() {
+                  _acceptedTerms = v ?? false;
+                  if (_termsError != null) {
+                    _termsError = _validateTerms();
+                  }
+                }),
                 title: const Text('Prihvatam uslove korištenja'),
+                subtitle: _termsError != null
+                    ? Text(
+                        _termsError!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      )
+                    : null,
+                controlAffinity: ListTileControlAffinity.leading,
               ),
               if (_error != null)
-                Text(_error!,
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error)),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    _error!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ),
               FilledButton.icon(
-                onPressed: canPay && !_joining ? _joinWithCoins : null,
+                onPressed: _joining ? null : _onJoinPressed,
                 icon: _joining
                     ? const SizedBox(
                         width: 18,
