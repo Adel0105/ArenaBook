@@ -8,6 +8,7 @@ using ArenaBook.Application.Contracts.Sessions;
 using System.Text.Json;
 using ArenaBook.Domain;
 using ArenaBook.Domain.Entities;
+using ArenaBook.Domain.Security;
 using ArenaBook.Infrastructure.Identity;
 using ArenaBook.Infrastructure.Persistence;
 using ArenaBook.Infrastructure.Validation;
@@ -336,6 +337,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             throw new ArenaBook.Application.Common.Exceptions.ValidationException("Validacija nije prošla.", validation.ToErrorDictionary());
 
         EnforceSchedulingPolicy(request.StartUtc, request.EndUtc, isAdministrator);
+        await ValidateOrganizerUserAsync(organizerUserId, cancellationToken);
 
         var kind = await _db.SessionKinds.AsNoTracking().FirstOrDefaultAsync(k => k.Id == request.SessionKindId, cancellationToken);
         if (kind is null)
@@ -798,6 +800,44 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         _db.ScheduledSessionParticipants.AnyAsync(
             p => p.ScheduledSessionId == sessionId && p.CoinsPaid > 0,
             cancellationToken);
+
+    private async Task ValidateOrganizerUserAsync(string organizerUserId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(organizerUserId))
+        {
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "Validacija nije prošla.",
+                new Dictionary<string, string[]>
+                {
+                    ["organizerUserId"] = ["Organizator nije pronađen."],
+                });
+        }
+
+        var user = await _userManager.FindByIdAsync(organizerUserId);
+        if (user is null)
+            throw new NotFoundException("Organizator nije pronađen.");
+
+        if (await _userManager.IsLockedOutAsync(user))
+        {
+            throw new BusinessRuleException(
+                "Organizator nije aktivan.",
+                new Dictionary<string, string[]> { ["organizerUserId"] = ["Organizator nije aktivan."] });
+        }
+
+        var roles = await _userManager.GetRolesAsync(user);
+        var canOrganize = roles.Contains(ApplicationRoles.Member)
+            || roles.Contains(ApplicationRoles.Organizer)
+            || roles.Contains(ApplicationRoles.Administrator);
+        if (!canOrganize)
+        {
+            throw new BusinessRuleException(
+                "Organizator mora imati ulogu Member, Organizer ili Administrator.",
+                new Dictionary<string, string[]>
+                {
+                    ["organizerUserId"] = ["Organizator mora imati ulogu Member, Organizer ili Administrator."],
+                });
+        }
+    }
 
     private static void EnforceSchedulingPolicy(DateTime startUtc, DateTime endUtc, bool isAdministrator)
     {

@@ -13,6 +13,7 @@ public sealed class CreateScheduledSessionRequestValidator : AbstractValidator<C
         RuleFor(x => x.MaxParticipants).GreaterThan(0);
         RuleFor(x => x.MaxAgeYears).GreaterThan(0).When(x => x.MaxAgeYears.HasValue);
         RuleFor(x => x.InviteCode).MaximumLength(32).When(x => !string.IsNullOrEmpty(x.InviteCode));
+        RuleFor(x => x.OrganizerUserId).MaximumLength(450).When(x => !string.IsNullOrWhiteSpace(x.OrganizerUserId));
 
         RuleFor(x => x)
             .Custom((request, context) =>
