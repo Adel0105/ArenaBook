@@ -42,18 +42,14 @@ public sealed class AdminUserService : IAdminUserService
         var skip = (normalizedPage - 1) * normalizedPageSize;
 
         var users = _userManager.Users.AsNoTracking();
-        var wallets = _db.UserCoinWallets.AsNoTracking();
 
         var baseQ =
             from u in users
-            join w in wallets on u.Id equals w.UserId into wg
-            from w in wg.DefaultIfEmpty()
             join c in _db.Cities.AsNoTracking() on u.CityId equals c.Id into cg
             from c in cg.DefaultIfEmpty()
             select new
             {
                 User = u,
-                RegisteredUtc = w != null ? (DateTime?)w.UpdatedUtc : null,
                 CityName = c != null ? c.Name : null,
             };
 
@@ -73,10 +69,10 @@ public sealed class AdminUserService : IAdminUserService
         }
 
         if (query.RegisteredFromUtc.HasValue)
-            baseQ = baseQ.Where(x => x.RegisteredUtc >= query.RegisteredFromUtc.Value);
+            baseQ = baseQ.Where(x => x.User.CreatedUtc >= query.RegisteredFromUtc.Value);
 
         if (query.RegisteredToUtc.HasValue)
-            baseQ = baseQ.Where(x => x.RegisteredUtc <= query.RegisteredToUtc.Value);
+            baseQ = baseQ.Where(x => x.User.CreatedUtc <= query.RegisteredToUtc.Value);
 
         if (query.IsLockedOut == true)
             baseQ = baseQ.Where(x => x.User.LockoutEnd != null && x.User.LockoutEnd > DateTimeOffset.UtcNow);
@@ -95,7 +91,7 @@ public sealed class AdminUserService : IAdminUserService
         foreach (var row in rows)
         {
             var roles = await _userManager.GetRolesAsync(row.User);
-            items.Add(MapListItem(row.User, roles, row.CityName, row.RegisteredUtc));
+            items.Add(MapListItem(row.User, roles, row.CityName));
         }
 
         return new PagedListResponse<AdminUserListItemResponse>
@@ -117,15 +113,10 @@ public sealed class AdminUserService : IAdminUserService
         var cityName = user.CityId.HasValue
             ? await _db.Cities.AsNoTracking().Where(c => c.Id == user.CityId).Select(c => c.Name).FirstOrDefaultAsync(cancellationToken)
             : null;
-        var registered = await _db.UserCoinWallets.AsNoTracking()
-            .Where(w => w.UserId == userId)
-            .Select(w => (DateTime?)w.UpdatedUtc)
-            .FirstOrDefaultAsync(cancellationToken);
-
         var organized = await _db.ScheduledSessions.CountAsync(s => s.OrganizerUserId == userId, cancellationToken);
         var participated = await _db.ScheduledSessionParticipants.CountAsync(p => p.UserId == userId, cancellationToken);
 
-        return MapDetails(user, roles, cityName, registered, organized, participated);
+        return MapDetails(user, roles, cityName, organized, participated);
     }
 
     public async Task<AdminUserDetailsResponse> CreateAsync(CreateAdminUserRequest request, CancellationToken cancellationToken = default)
@@ -150,6 +141,7 @@ public sealed class AdminUserService : IAdminUserService
             DateOfBirth = request.DateOfBirth,
             CityId = request.CityId,
             EmailConfirmed = true,
+            CreatedUtc = DateTime.UtcNow,
         };
 
         var createResult = await _userManager.CreateAsync(user, request.Password);
@@ -233,8 +225,7 @@ public sealed class AdminUserService : IAdminUserService
     private static AdminUserListItemResponse MapListItem(
         ApplicationUser user,
         IList<string> roles,
-        string? cityName,
-        DateTime? registeredUtc)
+        string? cityName)
     {
         var locked = user.LockoutEnd.HasValue && user.LockoutEnd > DateTimeOffset.UtcNow;
         return new AdminUserListItemResponse
@@ -249,7 +240,7 @@ public sealed class AdminUserService : IAdminUserService
             Roles = roles.OrderBy(r => r).ToArray(),
             IsLockedOut = locked,
             LockoutEnd = user.LockoutEnd,
-            RegisteredUtc = registeredUtc,
+            RegisteredUtc = user.CreatedUtc,
         };
     }
 
@@ -257,7 +248,6 @@ public sealed class AdminUserService : IAdminUserService
         ApplicationUser user,
         IList<string> roles,
         string? cityName,
-        DateTime? registeredUtc,
         int organized,
         int participated)
     {
@@ -275,7 +265,7 @@ public sealed class AdminUserService : IAdminUserService
             Roles = roles.OrderBy(r => r).ToArray(),
             IsLockedOut = locked,
             LockoutEnd = user.LockoutEnd,
-            RegisteredUtc = registeredUtc,
+            RegisteredUtc = user.CreatedUtc,
             SessionsOrganizedCount = organized,
             SessionsParticipatedCount = participated,
         };

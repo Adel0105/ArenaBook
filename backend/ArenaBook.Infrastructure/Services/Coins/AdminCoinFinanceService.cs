@@ -236,9 +236,10 @@ public sealed class AdminCoinFinanceService : IAdminCoinFinanceService
         CancellationToken cancellationToken = default)
     {
         var q = from e in _db.CoinLedgerEntries.AsNoTracking()
-            where e.ReasonCode == Domain.CoinLedgerReasonCodes.SessionJoin
-                  && e.RelatedScheduledSessionId != null
-                  && e.AmountCoins < 0
+            where e.RelatedScheduledSessionId != null
+                  && (
+                      (e.ReasonCode == Domain.CoinLedgerReasonCodes.SessionJoin && e.AmountCoins < 0)
+                      || (e.ReasonCode == Domain.CoinLedgerReasonCodes.SessionRefundCancel && e.AmountCoins > 0))
             join s in _db.ScheduledSessions.AsNoTracking() on e.RelatedScheduledSessionId equals s.Id
             select new { e, s.HallId, HallName = s.Hall.Name, CityName = s.Hall.City.Name, s.StartUtc };
 
@@ -254,7 +255,11 @@ public sealed class AdminCoinFinanceService : IAdminCoinFinanceService
                 HallId = g.Key.HallId,
                 HallName = g.Key.HallName,
                 CityName = g.Key.CityName,
-                SessionCount = g.Select(x => x.e.RelatedScheduledSessionId).Distinct().Count(),
+                SessionCount = g
+                    .Where(x => x.e.ReasonCode == Domain.CoinLedgerReasonCodes.SessionJoin)
+                    .Select(x => x.e.RelatedScheduledSessionId)
+                    .Distinct()
+                    .Count(),
                 TotalCoinsEarned = g.Sum(x => -x.e.AmountCoins),
             })
             .OrderByDescending(x => x.TotalCoinsEarned)

@@ -72,6 +72,7 @@ public sealed class AuthService : IAuthService
             DateOfBirth = request.DateOfBirth,
             CityId = request.CityId,
             EmailConfirmed = true,
+            CreatedUtc = DateTime.UtcNow,
         };
 
         var createResult = await _userManager.CreateAsync(user, request.Password);

@@ -342,6 +342,7 @@ public sealed class DemoDataSeedService : IDemoDataSeedService
                 LastName = last,
                 CityId = cityId,
                 DateOfBirth = dob,
+                CreatedUtc = DateTime.UtcNow.AddDays(-(30 + i * 12)),
             };
 
             var result = await _userManager.CreateAsync(user, password);

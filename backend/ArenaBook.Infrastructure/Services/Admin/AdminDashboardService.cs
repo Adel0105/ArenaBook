@@ -47,9 +47,9 @@ public sealed class AdminDashboardService : IAdminDashboardService
         var end = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc);
         var start = end.AddMonths(-(count - 1));
 
-        var usersRaw = await _db.UserCoinWallets.AsNoTracking()
-            .Where(w => w.UpdatedUtc >= start)
-            .GroupBy(w => new { w.UpdatedUtc.Year, w.UpdatedUtc.Month })
+        var usersRaw = await _db.Users.AsNoTracking()
+            .Where(u => u.CreatedUtc >= start)
+            .GroupBy(u => new { u.CreatedUtc.Year, u.CreatedUtc.Month })
             .Select(g => new { g.Key.Year, g.Key.Month, C = g.Count() })
             .ToListAsync(cancellationToken);
 
