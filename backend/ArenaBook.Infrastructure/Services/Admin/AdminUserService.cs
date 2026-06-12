@@ -87,12 +87,26 @@ public sealed class AdminUserService : IAdminUserService
             .Take(normalizedPageSize)
             .ToListAsync(cancellationToken);
 
-        var items = new List<AdminUserListItemResponse>();
-        foreach (var row in rows)
-        {
-            var roles = await _userManager.GetRolesAsync(row.User);
-            items.Add(MapListItem(row.User, roles, row.CityName));
-        }
+        var userIds = rows.Select(r => r.User.Id).ToList();
+        var roleRows = await (
+            from ur in _db.UserRoles.AsNoTracking()
+            join r in _db.Roles.AsNoTracking() on ur.RoleId equals r.Id
+            where userIds.Contains(ur.UserId)
+            select new { ur.UserId, RoleName = r.Name ?? string.Empty })
+            .ToListAsync(cancellationToken);
+
+        var rolesByUserId = roleRows
+            .GroupBy(x => x.UserId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IList<string>)g.Select(x => x.RoleName).OrderBy(n => n).ToList());
+
+        var items = rows
+            .Select(row => MapListItem(
+                row.User,
+                rolesByUserId.GetValueOrDefault(row.User.Id) ?? [],
+                row.CityName))
+            .ToList();
 
         return new PagedListResponse<AdminUserListItemResponse>
         {

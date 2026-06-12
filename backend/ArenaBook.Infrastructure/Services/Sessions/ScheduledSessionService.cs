@@ -908,12 +908,20 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             .Where(p => p.ScheduledSessionId == sessionId && p.CoinsPaid > 0)
             .ToListAsync(cancellationToken);
 
+        if (participants.Count == 0)
+            return Array.Empty<(string, decimal)>();
+
+        var participantUserIds = participants.Select(p => p.UserId).Distinct().ToList();
+        var wallets = await _db.UserCoinWallets
+            .Where(w => participantUserIds.Contains(w.UserId))
+            .ToListAsync(cancellationToken);
+        var walletByUserId = wallets.ToDictionary(w => w.UserId);
+
         var refunds = new List<(string UserId, decimal Amount)>();
 
         foreach (var p in participants)
         {
-            var wallet = await _db.UserCoinWallets.FirstOrDefaultAsync(w => w.UserId == p.UserId, cancellationToken);
-            if (wallet is null)
+            if (!walletByUserId.TryGetValue(p.UserId, out var wallet))
                 continue;
 
             var amount = p.CoinsPaid;
