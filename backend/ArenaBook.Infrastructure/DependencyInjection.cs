@@ -133,6 +133,7 @@ public static class DependencyInjection
         services.AddScoped<IStripeCoinSandboxService, StripeCoinSandboxService>();
         services.AddScoped<IPayPalCoinSandboxService, PayPalCoinSandboxService>();
         services.AddScoped<IPlayerNotificationService, PlayerNotificationService>();
+        services.AddScoped<IUserNotificationPublisher, UserNotificationPublisher>();
 
         return services;
     }

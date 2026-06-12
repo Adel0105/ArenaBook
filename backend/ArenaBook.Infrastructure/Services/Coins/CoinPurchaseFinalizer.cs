@@ -1,10 +1,7 @@
-using System.Globalization;
-using System.Text.Json;
 using ArenaBook.Application.Abstractions.Coins;
-using ArenaBook.Application.Abstractions.Messaging;
+using ArenaBook.Application.Abstractions.Notifications;
 using ArenaBook.Domain;
 using ArenaBook.Domain.Entities;
-using ArenaBook.Domain.Messaging;
 using ArenaBook.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -14,16 +11,16 @@ namespace ArenaBook.Infrastructure.Services.Coins;
 public sealed class CoinPurchaseFinalizer : ICoinPurchaseFinalizer
 {
     private readonly ArenaBookDbContext _db;
-    private readonly IRabbitMqEventPublisher _rabbit;
+    private readonly IUserNotificationPublisher _notifications;
     private readonly ILogger<CoinPurchaseFinalizer> _logger;
 
     public CoinPurchaseFinalizer(
         ArenaBookDbContext db,
-        IRabbitMqEventPublisher rabbit,
+        IUserNotificationPublisher notifications,
         ILogger<CoinPurchaseFinalizer> logger)
     {
         _db = db;
-        _rabbit = rabbit;
+        _notifications = notifications;
         _logger = logger;
     }
 
@@ -137,7 +134,15 @@ public sealed class CoinPurchaseFinalizer : ICoinPurchaseFinalizer
         await _db.SaveChangesAsync(cancellationToken);
         await tx.CommitAsync(cancellationToken);
 
-        await TryPublishNotificationAsync(payment.UserId, payment.Provider, cancellationToken);
+        var isPayPal = string.Equals(payment.Provider, "PayPal", StringComparison.OrdinalIgnoreCase);
+        await _notifications.TryPublishAsync(
+            payment.UserId,
+            isPayPal ? "Kupovina koina (PayPal)" : "Kupovina koina",
+            isPayPal
+                ? "PayPal uplata je potvrđena i stanje koina je ažurirano."
+                : "Uplata je potvrđena i stanje koina je ažurirano.",
+            isPayPal ? "coin_purchase_paypal_ok" : "coin_purchase_ok",
+            cancellationToken);
 
         return new CoinPurchaseFinalizeResult
         {
@@ -178,36 +183,6 @@ public sealed class CoinPurchaseFinalizer : ICoinPurchaseFinalizer
             CoinsPurchased = payment.CoinsPurchased,
             UserId = payment.UserId,
         };
-    }
-
-    private async Task TryPublishNotificationAsync(
-        string userId,
-        string provider,
-        CancellationToken cancellationToken)
-    {
-        var isPayPal = string.Equals(provider, "PayPal", StringComparison.OrdinalIgnoreCase);
-        var payload = new
-        {
-            schemaVersion = 1,
-            kind = RabbitMessageKinds.UserNotification,
-            userId,
-            title = isPayPal ? "Kupovina koina (PayPal)" : "Kupovina koina",
-            body = isPayPal
-                ? "PayPal uplata je potvrđena i stanje koina je ažurirano."
-                : "Uplata je potvrđena i stanje koina je ažurirano.",
-            typeCode = isPayPal ? "coin_purchase_paypal_ok" : "coin_purchase_ok",
-        };
-        var json = JsonSerializer.Serialize(
-            payload,
-            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
-        try
-        {
-            await _rabbit.PublishJsonAsync(json, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "RabbitMQ publish nakon kupovine koina nije uspio");
-        }
     }
 
     private async Task<int> StatusIdByCodeAsync(string code, CancellationToken cancellationToken)

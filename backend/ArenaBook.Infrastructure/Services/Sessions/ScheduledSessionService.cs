@@ -1,4 +1,5 @@
 using ArenaBook.Application.Abstractions;
+using ArenaBook.Application.Abstractions.Notifications;
 using ArenaBook.Application.Abstractions.Sessions;
 using ArenaBook.Application.Common.Exceptions;
 using ArenaBook.Application.Sessions;
@@ -28,6 +29,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
     private readonly ArenaBookDbContext _db;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ISessionOrganizerRoleService _organizerRoleService;
+    private readonly IUserNotificationPublisher _notifications;
     private readonly IValidator<CreateScheduledSessionRequest> _createValidator;
     private readonly IValidator<UpdateScheduledSessionRequest> _updateValidator;
     private readonly IValidator<JoinScheduledSessionRequest> _joinValidator;
@@ -37,6 +39,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         ArenaBookDbContext db,
         UserManager<ApplicationUser> userManager,
         ISessionOrganizerRoleService organizerRoleService,
+        IUserNotificationPublisher notifications,
         IValidator<CreateScheduledSessionRequest> createValidator,
         IValidator<UpdateScheduledSessionRequest> updateValidator,
         IValidator<JoinScheduledSessionRequest> joinValidator,
@@ -45,6 +48,7 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         _db = db;
         _userManager = userManager;
         _organizerRoleService = organizerRoleService;
+        _notifications = notifications;
         _createValidator = createValidator;
         _updateValidator = updateValidator;
         _joinValidator = joinValidator;
@@ -431,6 +435,10 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         await _db.SaveChangesAsync(cancellationToken);
         await tx.CommitAsync(cancellationToken);
 
+        await _notifications.TryPublishManyAsync(
+            [SessionNotificationBuilder.SessionCreated(organizerUserId, hall.Name, entity.StartUtc)],
+            cancellationToken);
+
         return await GetByIdAsync(entity.Id, organizerUserId, isAdministrator, cancellationToken);
     }
 
@@ -722,6 +730,20 @@ public sealed class ScheduledSessionService : IScheduledSessionService
 
         await _db.SaveChangesAsync(cancellationToken);
         await tx.CommitAsync(cancellationToken);
+
+        var joinMessages = new List<UserNotificationMessage>
+        {
+            SessionNotificationBuilder.ParticipantJoinedSelf(userId, session.Hall.Name, session.StartUtc),
+        };
+        if (!string.Equals(session.OrganizerUserId, userId, StringComparison.Ordinal))
+        {
+            joinMessages.Add(SessionNotificationBuilder.ParticipantJoinedOrganizer(
+                session.OrganizerUserId,
+                session.Hall.Name,
+                session.StartUtc));
+        }
+
+        await _notifications.TryPublishManyAsync(joinMessages, cancellationToken);
     }
 
     private async Task<ScheduledSessionDetailsResponse> ApplyLifecycleTransitionAsync(
@@ -744,11 +766,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
 
         var targetId = await LifecycleIdAsync(plan.TargetStatusCode, cancellationToken);
         var prev = entity.SessionLifecycleStatusId;
+        var notificationContext = await LoadSessionNotificationContextAsync(sessionId, cancellationToken);
+        var participantUserIds = await GetParticipantUserIdsAsync(sessionId, cancellationToken);
 
         await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
 
+        IReadOnlyList<(string UserId, decimal Amount)> refunds = Array.Empty<(string, decimal)>();
         if (plan.RefundParticipants)
-            await RefundParticipantsAsync(sessionId, cancellationToken);
+            refunds = await RefundParticipantsAsync(sessionId, cancellationToken);
 
         entity.SessionLifecycleStatusId = targetId;
 
@@ -766,14 +791,124 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         await _db.SaveChangesAsync(cancellationToken);
         await tx.CommitAsync(cancellationToken);
 
+        if (notificationContext is not null)
+        {
+            await PublishLifecycleNotificationsAsync(
+                action,
+                notificationContext,
+                participantUserIds,
+                cancelReason,
+                refunds,
+                cancellationToken);
+        }
+
         return await GetByIdAsync(sessionId, actorUserId, isAdministrator, cancellationToken);
     }
 
-    private async Task RefundParticipantsAsync(int sessionId, CancellationToken cancellationToken)
+    private async Task PublishLifecycleNotificationsAsync(
+        ScheduledSessionLifecycleAction action,
+        SessionNotificationContext context,
+        IReadOnlyList<string> participantUserIds,
+        string? cancelReason,
+        IReadOnlyList<(string UserId, decimal Amount)> refunds,
+        CancellationToken cancellationToken)
+    {
+        var messages = new List<UserNotificationMessage>();
+
+        switch (action)
+        {
+            case ScheduledSessionLifecycleAction.Confirm:
+                foreach (var userId in participantUserIds)
+                {
+                    messages.Add(SessionNotificationBuilder.SessionConfirmed(
+                        userId,
+                        context.HallName,
+                        context.StartUtc));
+                }
+
+                break;
+
+            case ScheduledSessionLifecycleAction.Cancel:
+                var reason = string.IsNullOrWhiteSpace(cancelReason) ? "Nije naveden." : cancelReason.Trim();
+                foreach (var userId in participantUserIds)
+                {
+                    messages.Add(SessionNotificationBuilder.SessionCancelled(
+                        userId,
+                        context.HallName,
+                        context.StartUtc,
+                        reason));
+                }
+
+                AppendRefundNotifications(messages, context.HallName, refunds);
+                break;
+
+            case ScheduledSessionLifecycleAction.AdminDelete:
+                var deleteReason = string.IsNullOrWhiteSpace(cancelReason) ? "Nije naveden." : cancelReason.Trim();
+                foreach (var userId in participantUserIds)
+                {
+                    messages.Add(SessionNotificationBuilder.SessionDeleted(
+                        userId,
+                        context.HallName,
+                        context.StartUtc,
+                        deleteReason));
+                }
+
+                AppendRefundNotifications(messages, context.HallName, refunds);
+                break;
+
+            case ScheduledSessionLifecycleAction.Complete:
+                foreach (var userId in participantUserIds)
+                {
+                    messages.Add(SessionNotificationBuilder.SessionCompleted(
+                        userId,
+                        context.HallName,
+                        context.StartUtc));
+                }
+
+                break;
+        }
+
+        if (messages.Count > 0)
+            await _notifications.TryPublishManyAsync(messages, cancellationToken);
+    }
+
+    private static void AppendRefundNotifications(
+        List<UserNotificationMessage> messages,
+        string hallName,
+        IReadOnlyList<(string UserId, decimal Amount)> refunds)
+    {
+        foreach (var (userId, amount) in refunds)
+        {
+            messages.Add(SessionNotificationBuilder.SessionRefund(userId, hallName, amount));
+        }
+    }
+
+    private async Task<SessionNotificationContext?> LoadSessionNotificationContextAsync(
+        int sessionId,
+        CancellationToken cancellationToken)
+    {
+        return await _db.ScheduledSessions.AsNoTracking()
+            .Where(s => s.Id == sessionId)
+            .Select(s => new SessionNotificationContext(s.Id, s.Hall.Name, s.StartUtc, s.OrganizerUserId))
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    private Task<List<string>> GetParticipantUserIdsAsync(int sessionId, CancellationToken cancellationToken) =>
+        _db.ScheduledSessionParticipants.AsNoTracking()
+            .Where(p => p.ScheduledSessionId == sessionId)
+            .Select(p => p.UserId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+    private async Task<IReadOnlyList<(string UserId, decimal Amount)>> RefundParticipantsAsync(
+        int sessionId,
+        CancellationToken cancellationToken)
     {
         var participants = await _db.ScheduledSessionParticipants
             .Where(p => p.ScheduledSessionId == sessionId && p.CoinsPaid > 0)
             .ToListAsync(cancellationToken);
+
+        var refunds = new List<(string UserId, decimal Amount)>();
 
         foreach (var p in participants)
         {
@@ -793,8 +928,17 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 CreatedUtc = DateTime.UtcNow,
             });
             p.CoinsPaid = 0;
+            refunds.Add((p.UserId, amount));
         }
+
+        return refunds;
     }
+
+    private sealed record SessionNotificationContext(
+        int SessionId,
+        string HallName,
+        DateTime StartUtc,
+        string OrganizerUserId);
 
     private Task<bool> HasPaidParticipantsAsync(int sessionId, CancellationToken cancellationToken) =>
         _db.ScheduledSessionParticipants.AnyAsync(
