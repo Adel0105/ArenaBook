@@ -392,20 +392,19 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             CreatedUtc = DateTime.UtcNow,
         };
 
-        _db.ScheduledSessions.Add(entity);
-        await _db.SaveChangesAsync(cancellationToken);
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
 
+        _db.ScheduledSessions.Add(entity);
         _db.ScheduledSessionParticipants.Add(new ScheduledSessionParticipant
         {
-            ScheduledSessionId = entity.Id,
+            ScheduledSession = entity,
             UserId = organizerUserId,
             JoinedUtc = DateTime.UtcNow,
             CoinsPaid = 0,
             IsOrganizer = true,
         });
-        await _db.SaveChangesAsync(cancellationToken);
 
-        await _organizerRoleService.EnsureOrganizerRoleForUserAsync(organizerUserId, cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
 
         AppendAudit(
             entity.Id,
@@ -425,7 +424,10 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 totalPrice,
                 participantPrice,
             }));
+
+        await _organizerRoleService.EnsureOrganizerRoleForUserAsync(organizerUserId, cancellationToken);
         await _db.SaveChangesAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
 
         return await GetByIdAsync(entity.Id, organizerUserId, isAdministrator, cancellationToken);
     }
@@ -669,6 +671,9 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             throw new ConflictException("Termin je popunjen.");
 
         var cost = session.PricePerParticipantCoins;
+
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
+
         var wallet = await _db.UserCoinWallets
             .FirstOrDefaultAsync(w => w.UserId == userId, cancellationToken);
         if (wallet is null)
@@ -680,7 +685,6 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 UpdatedUtc = DateTime.UtcNow,
             };
             _db.UserCoinWallets.Add(wallet);
-            await _db.SaveChangesAsync(cancellationToken);
         }
 
         if (wallet.BalanceCoins < cost)
@@ -713,7 +717,9 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             null,
             null,
             SerializeDetails(new { participantUserId = userId, coinsPaid = cost }));
+
         await _db.SaveChangesAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
     }
 
     private async Task<ScheduledSessionDetailsResponse> ApplyLifecycleTransitionAsync(
@@ -737,6 +743,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         var targetId = await LifecycleIdAsync(plan.TargetStatusCode, cancellationToken);
         var prev = entity.SessionLifecycleStatusId;
 
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
+
         if (plan.RefundParticipants)
             await RefundParticipantsAsync(sessionId, cancellationToken);
 
@@ -754,6 +762,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
 
         AppendAudit(sessionId, actorUserId, auditAction, prev, targetId, auditJson);
         await _db.SaveChangesAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+
         return await GetByIdAsync(sessionId, actorUserId, isAdministrator, cancellationToken);
     }
 
