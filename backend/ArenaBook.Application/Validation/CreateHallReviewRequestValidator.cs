@@ -8,8 +8,10 @@ public sealed class CreateHallReviewRequestValidator : AbstractValidator<CreateH
     public CreateHallReviewRequestValidator()
     {
         RuleFor(x => x.ScheduledSessionId)
+            .NotNull()
+            .WithMessage("Recenzija mora biti vezana za završeni termin u kojem ste sudjelovali.")
             .GreaterThan(0)
-            .When(x => x.ScheduledSessionId.HasValue);
+            .WithMessage("Recenzija mora biti vezana za završeni termin u kojem ste sudjelovali.");
         RuleFor(x => x.RatingStars).InclusiveBetween((byte)1, (byte)5);
         RuleFor(x => x.Comment).MaximumLength(2000).When(x => !string.IsNullOrWhiteSpace(x.Comment));
     }

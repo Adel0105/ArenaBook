@@ -101,10 +101,17 @@ public sealed class HallReviewService : IHallReviewService
         if (!await _db.Halls.AsNoTracking().AnyAsync(h => h.Id == hallId, cancellationToken))
             throw new NotFoundException("Dvorana nije pronađena.");
 
-        if (request.ScheduledSessionId is { } sessionId && sessionId > 0)
-            return await CreateSessionReviewAsync(hallId, userId, sessionId, request, cancellationToken);
+        if (request.ScheduledSessionId is not int sessionId || sessionId <= 0)
+        {
+            throw new ValidationException(
+                "Recenzija nije dozvoljena.",
+                new Dictionary<string, string[]>
+                {
+                    ["scheduledSessionId"] = ["Recenzija mora biti vezana za završeni termin u kojem ste sudjelovali."],
+                });
+        }
 
-        return await UpsertDirectHallReviewAsync(hallId, userId, request, cancellationToken);
+        return await CreateSessionReviewAsync(hallId, userId, sessionId, request, cancellationToken);
     }
 
     private async Task<HallReviewResponse> CreateSessionReviewAsync(
@@ -150,38 +157,6 @@ public sealed class HallReviewService : IHallReviewService
         await _db.SaveChangesAsync(cancellationToken);
 
         return await MapReviewResponseAsync(entity, cancellationToken);
-    }
-
-    private async Task<HallReviewResponse> UpsertDirectHallReviewAsync(
-        int hallId,
-        string userId,
-        CreateHallReviewRequest request,
-        CancellationToken cancellationToken)
-    {
-        var existing = await _db.HallReviews
-            .FirstOrDefaultAsync(r => r.HallId == hallId && r.UserId == userId, cancellationToken);
-
-        if (existing is null)
-        {
-            existing = new HallReview
-            {
-                HallId = hallId,
-                UserId = userId,
-                ScheduledSessionId = null,
-                RatingStars = request.RatingStars,
-                Comment = NormalizeComment(request.Comment),
-                CreatedUtc = DateTime.UtcNow,
-            };
-            _db.HallReviews.Add(existing);
-        }
-        else
-        {
-            existing.RatingStars = request.RatingStars;
-            existing.Comment = NormalizeComment(request.Comment);
-        }
-
-        await _db.SaveChangesAsync(cancellationToken);
-        return await MapReviewResponseAsync(existing, cancellationToken);
     }
 
     private async Task<HallReviewResponse> MapReviewResponseAsync(

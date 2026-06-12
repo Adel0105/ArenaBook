@@ -34,10 +34,7 @@ class _HallDetailScreenState extends State<HallDetailScreen> {
   List<SessionListItem> _sessions = [];
   HallReactionSummary? _reactions;
   bool _loading = true;
-  bool _savingReview = false;
   bool _savingReaction = false;
-  int _draftStars = 5;
-  final _commentCtrl = TextEditingController();
   static final _fmt = DateFormat('dd.MM.yyyy HH:mm');
   static final _reviewDateFmt = DateFormat('dd.MM.yyyy');
 
@@ -45,19 +42,6 @@ class _HallDetailScreenState extends State<HallDetailScreen> {
   void initState() {
     super.initState();
     _load();
-  }
-
-  @override
-  void dispose() {
-    _commentCtrl.dispose();
-    super.dispose();
-  }
-
-  HallReview? get _myReview {
-    for (final r in _reviews) {
-      if (r.userId == widget.user.userId) return r;
-    }
-    return null;
   }
 
   double get _averageRating {
@@ -77,13 +61,6 @@ class _HallDetailScreenState extends State<HallDetailScreen> {
       final sessions =
           await widget.api.sessions(hallId: widget.hallId, pageSize: 30);
       if (mounted) {
-        HallReview? mine;
-        for (final r in reviews.items) {
-          if (r.userId == widget.user.userId) {
-            mine = r;
-            break;
-          }
-        }
         setState(() {
           _hall = hall;
           _photos = photos.items;
@@ -93,47 +70,12 @@ class _HallDetailScreenState extends State<HallDetailScreen> {
           _sessions = sessions.items
               .where((s) => s.sessionLifecycleCode == 'CONFIRMED')
               .toList();
-          if (mine != null) {
-            _draftStars = mine.ratingStars;
-            _commentCtrl.text = mine.comment ?? '';
-          }
           _loading = false;
         });
       }
     } catch (_) {
       if (mounted) {
         setState(() => _loading = false);
-      }
-    }
-  }
-
-  Future<void> _submitReview() async {
-    setState(() => _savingReview = true);
-    try {
-      await widget.api.createHallReview(widget.hallId, {
-        'ratingStars': _draftStars,
-        'comment': _commentCtrl.text.trim(),
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              _myReview != null
-                  ? 'Recenzija je ažurirana.'
-                  : 'Hvala! Recenzija je objavljena.',
-            ),
-          ),
-        );
-      }
-      await _load();
-    } on ApiError catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(e.message)));
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _savingReview = false);
       }
     }
   }
@@ -170,24 +112,6 @@ class _HallDetailScreenState extends State<HallDetailScreen> {
           i < rating ? Icons.star_rounded : Icons.star_border_rounded,
           color: Colors.amber.shade700,
           size: size,
-        ),
-      ),
-    );
-  }
-
-  Widget _interactiveStarPicker() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(
-        5,
-        (i) => IconButton(
-          tooltip: '${i + 1} zvjezdica',
-          icon: Icon(
-            i < _draftStars ? Icons.star_rounded : Icons.star_border_rounded,
-            color: Colors.amber.shade700,
-            size: 34,
-          ),
-          onPressed: () => setState(() => _draftStars = i + 1),
         ),
       ),
     );
@@ -345,7 +269,7 @@ class _HallDetailScreenState extends State<HallDetailScreen> {
             AppSection(
               title: 'Recenzije i ocjene',
               subtitle: _reviews.isEmpty
-                  ? 'Budite prvi koji ocjenjuje ovu dvoranu'
+                  ? 'Recenzije se ostavljaju nakon završenog termina'
                   : '${_reviews.length} recenzija · prosjek ${_averageRating.toStringAsFixed(1)} ★',
               icon: Icons.star_outline,
               tone: AppSectionTone.slate,
@@ -374,57 +298,8 @@ class _HallDetailScreenState extends State<HallDetailScreen> {
                   ),
                   const SizedBox(height: 16),
                 ],
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: AppColors.cardBorder),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Text(
-                          _myReview != null
-                              ? 'Ažurirajte svoju recenziju'
-                              : 'Ostavite recenziju',
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                        const SizedBox(height: 4),
-                        _interactiveStarPicker(),
-                        TextField(
-                          controller: _commentCtrl,
-                          decoration: const InputDecoration(
-                            labelText: 'Komentar (opcionalno)',
-                            hintText: 'Podijelite iskustvo s drugim igračima…',
-                            alignLabelWithHint: true,
-                          ),
-                          maxLines: 3,
-                          maxLength: 2000,
-                        ),
-                        const SizedBox(height: 4),
-                        FilledButton.icon(
-                          onPressed: _savingReview ? null : _submitReview,
-                          icon: _savingReview
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : Icon(_myReview != null
-                                  ? Icons.edit_outlined
-                                  : Icons.send_outlined),
-                          label: Text(_myReview != null
-                              ? 'Spremi promjene'
-                              : 'Objavi recenziju'),
-                        ),
-                      ],
-                    ),
-                  ),
+                const Text(
+                  'Svoju recenziju možete ostaviti na početnoj stranici nakon završetka termina u kojem ste sudjelovali.',
                 ),
                 const SizedBox(height: 12),
                 if (_reviews.isEmpty)
