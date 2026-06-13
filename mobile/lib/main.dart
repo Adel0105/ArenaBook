@@ -8,10 +8,12 @@ import 'package:arena_book_mobile/screens/login_screen.dart';
 import 'package:arena_book_mobile/screens/player_shell.dart';
 import 'package:arena_book_mobile/services/arena_book_api.dart';
 import 'package:arena_book_mobile/services/paypal_checkout_handler.dart';
+import 'package:arena_book_mobile/services/stripe_bootstrap.dart';
 import 'package:flutter/material.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await StripeBootstrap.initialize();
   runApp(const ArenaBookMobileApp());
 }
 

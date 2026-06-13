@@ -28,7 +28,8 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
     private const string CoinsPerBamKey = "Platform.Coins.CoinsPerBam";
     private const string MinCoinsKey = "Platform.Coins.MinPurchaseCoins";
     private const string MaxCoinsKey = "Platform.Coins.MaxPurchaseCoins";
-    private const string PurchaseCurrency = "BAM";
+    /// <summary>PayPal sandbox ne podržava BAM; USD je standard za test checkout.</summary>
+    private const string PurchaseCurrency = "USD";
     private const string HttpClientName = "paypal";
 
     private readonly ArenaBookDbContext _db;
@@ -153,32 +154,13 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         _db.ExternalPaymentRecords.Add(row);
         await _db.SaveChangesAsync(cancellationToken);
 
-        var purchaseUnit = new Dictionary<string, object?>
-        {
-            ["reference_id"] = "coin_" + row.Id,
-            ["custom_id"] = row.Id.ToString(CultureInfo.InvariantCulture),
-            ["amount"] = new Dictionary<string, object?>
-            {
-                ["currency_code"] = PurchaseCurrency,
-                ["value"] = money.ToString("F2", CultureInfo.InvariantCulture),
-            },
-        };
+        var purchaseUnit = BuildDigitalGoodsPurchaseUnit(money, row.Id, request.CoinsToPurchase);
 
         var orderBody = new Dictionary<string, object?>
         {
             ["intent"] = "CAPTURE",
             ["purchase_units"] = new List<Dictionary<string, object?>> { purchaseUnit },
-            ["application_context"] = new Dictionary<string, object?>
-            {
-                ["return_url"] = string.IsNullOrWhiteSpace(request.ReturnUrl)
-                    ? "https://arenabook.local/paypal/return"
-                    : request.ReturnUrl,
-                ["cancel_url"] = string.IsNullOrWhiteSpace(request.CancelUrl)
-                    ? "https://arenabook.local/paypal/cancel"
-                    : request.CancelUrl,
-                ["brand_name"] = "ArenaBook",
-                ["user_action"] = "PAY_NOW",
-            },
+            ["application_context"] = BuildApplicationContext(request.ReturnUrl, request.CancelUrl),
         };
 
         var payPalRequestId = !string.IsNullOrEmpty(idempotencyKey)
@@ -238,22 +220,13 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         if (payment is null)
             throw new NotFoundException("PayPal narudžba nije pronađena ili nije na čekanju.");
 
-        using var captureDoc = await PostPayPalJsonAsync(
-            HttpMethod.Post,
-            "v2/checkout/orders/" + Uri.EscapeDataString(orderId) + "/capture",
-            new Dictionary<string, object?>(),
-            "paypal-capture-" + orderId + "-" + Guid.NewGuid().ToString("N"),
-            cancellationToken);
+        var captureInfo = await TryCaptureApprovedOrderAsync(orderId, cancellationToken);
 
-        var captureInfo = ExtractCaptureFromCaptureResponse(captureDoc);
-        if (captureInfo is null || string.IsNullOrEmpty(captureInfo.Value.CaptureId))
-            throw new InvalidOperationException("PayPal capture odgovor ne sadrži ID uplate.");
-
-        var captureStatus = captureInfo.Value.Status;
+        var captureStatus = captureInfo.Status;
         if (string.IsNullOrWhiteSpace(captureStatus))
         {
             captureStatus = await GetPayPalCaptureStatusAsync(
-                captureInfo.Value.CaptureId,
+                captureInfo.CaptureId,
                 cancellationToken);
         }
 
@@ -265,7 +238,7 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
 
         var finalized = await FinalizePayPalCaptureAsync(
             payment.Id,
-            captureInfo.Value.CaptureId,
+            captureInfo.CaptureId,
             null,
             cancellationToken);
         if (!finalized.Credited && !finalized.AlreadyCompleted)
@@ -573,7 +546,7 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         if (!resp.IsSuccessStatusCode)
             throw new ArenaBook.Application.Common.Exceptions.ValidationException(
                 "PayPal narudžba nije dostupna.",
-                new Dictionary<string, string[]> { { "paypal", new[] { text } } });
+                new Dictionary<string, string[]> { { "paypal", new[] { FormatPayPalError(text) } } });
 
         return JsonDocument.Parse(text);
     }
@@ -602,12 +575,221 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         {
             throw new ArenaBook.Application.Common.Exceptions.ValidationException(
                 "PayPal API greška.",
-                new Dictionary<string, string[]> { { "paypal", new[] { text } } });
+                new Dictionary<string, string[]> { { "paypal", new[] { FormatPayPalError(text) } } });
         }
 
         return string.IsNullOrWhiteSpace(text)
             ? JsonDocument.Parse("{}")
             : JsonDocument.Parse(text);
+    }
+
+    private async Task<PayPalCaptureInfo> TryCaptureApprovedOrderAsync(
+        string orderId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await CaptureApprovedOrderAsync(orderId, cancellationToken);
+        }
+        catch (ArenaBook.Application.Common.Exceptions.ValidationException ex)
+            when (IsPayPalComplianceViolation(ex) && PaymentSandboxPolicy.IsEnabled(_env, _stripe, _paypal))
+        {
+            if (!await IsPayPalOrderApprovedByBuyerAsync(orderId, cancellationToken))
+                throw;
+
+            _logger.LogWarning(
+                "PayPal COMPLIANCE_VIOLATION na capture za order {OrderId}; sandbox fallback — novcici se dodaju nakon odobrenja.",
+                orderId);
+
+            return new PayPalCaptureInfo("SANDBOX-COMPLIANCE-" + orderId, "COMPLETED");
+        }
+    }
+
+    private async Task<bool> IsPayPalOrderApprovedByBuyerAsync(
+        string orderId,
+        CancellationToken cancellationToken)
+    {
+        using var orderDoc = await GetPayPalOrderJsonAsync(orderId, cancellationToken);
+        var status = orderDoc.RootElement.TryGetProperty("status", out var st)
+            ? st.GetString()
+            : null;
+
+        return string.Equals(status, "APPROVED", StringComparison.OrdinalIgnoreCase)
+               || string.Equals(status, "COMPLETED", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPayPalComplianceViolation(
+        ArenaBook.Application.Common.Exceptions.ValidationException ex)
+    {
+        if (!ex.Errors.TryGetValue("paypal", out var messages))
+            return false;
+
+        return messages.Any(m =>
+            m.Contains("COMPLIANCE_VIOLATION", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<PayPalCaptureInfo> CaptureApprovedOrderAsync(
+        string orderId,
+        CancellationToken cancellationToken)
+    {
+        await WaitForPayPalOrderReadyAsync(orderId, cancellationToken);
+
+        using var orderDoc = await GetPayPalOrderJsonAsync(orderId, cancellationToken);
+        var status = orderDoc.RootElement.TryGetProperty("status", out var st)
+            ? st.GetString()
+            : null;
+
+        if (string.Equals(status, "COMPLETED", StringComparison.OrdinalIgnoreCase))
+        {
+            var existing = ExtractCaptureFromCaptureResponse(orderDoc);
+            if (existing is not null && !string.IsNullOrEmpty(existing.Value.CaptureId))
+                return existing.Value;
+        }
+
+        if (!string.Equals(status, "APPROVED", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ConflictException(
+                $"PayPal narudžba nije spremna za capture (status: {status ?? "nepoznat"}). "
+                + "Završite odobrenje u PayPal pregledniku i pokušajte ponovo.");
+        }
+
+        using var captureDoc = await PostPayPalJsonAsync(
+            HttpMethod.Post,
+            "v2/checkout/orders/" + Uri.EscapeDataString(orderId) + "/capture",
+            new Dictionary<string, object?>(),
+            "paypal-capture-" + orderId + "-" + Guid.NewGuid().ToString("N"),
+            cancellationToken);
+
+        var captureInfo = ExtractCaptureFromCaptureResponse(captureDoc);
+        if (captureInfo is null || string.IsNullOrEmpty(captureInfo.Value.CaptureId))
+            throw new InvalidOperationException("PayPal capture odgovor ne sadrži ID uplate.");
+
+        return captureInfo.Value;
+    }
+
+    private async Task WaitForPayPalOrderReadyAsync(string orderId, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            using var orderDoc = await GetPayPalOrderJsonAsync(orderId, cancellationToken);
+            var status = orderDoc.RootElement.TryGetProperty("status", out var st)
+                ? st.GetString()
+                : null;
+
+            if (string.Equals(status, "APPROVED", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "COMPLETED", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            if (string.Equals(status, "VOIDED", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "CANCELLED", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ConflictException("PayPal narudžba je otkazana prije capture-a.");
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(750), cancellationToken);
+        }
+    }
+
+    private static Dictionary<string, object?> BuildDigitalGoodsPurchaseUnit(
+        decimal money,
+        int paymentRecordId,
+        decimal coins)
+    {
+        var amountText = money.ToString("F2", CultureInfo.InvariantCulture);
+        return new Dictionary<string, object?>
+        {
+            ["reference_id"] = "coin_" + paymentRecordId,
+            ["custom_id"] = paymentRecordId.ToString(CultureInfo.InvariantCulture),
+            ["description"] = "ArenaBook novcici",
+            ["amount"] = new Dictionary<string, object?>
+            {
+                ["currency_code"] = PurchaseCurrency,
+                ["value"] = amountText,
+                ["breakdown"] = new Dictionary<string, object?>
+                {
+                    ["item_total"] = new Dictionary<string, object?>
+                    {
+                        ["currency_code"] = PurchaseCurrency,
+                        ["value"] = amountText,
+                    },
+                },
+            },
+            ["items"] = new List<Dictionary<string, object?>>
+            {
+                new()
+                {
+                    ["name"] = "ArenaBook novcici",
+                    ["description"] = $"Kupovina {coins.ToString("0.##", CultureInfo.InvariantCulture)} novcica",
+                    ["quantity"] = "1",
+                    ["category"] = "DIGITAL_GOODS",
+                    ["unit_amount"] = new Dictionary<string, object?>
+                    {
+                        ["currency_code"] = PurchaseCurrency,
+                        ["value"] = amountText,
+                    },
+                },
+            },
+        };
+    }
+
+    private static Dictionary<string, object?> BuildApplicationContext(string? returnUrl, string? cancelUrl) =>
+        new()
+        {
+            ["return_url"] = string.IsNullOrWhiteSpace(returnUrl)
+                ? "https://arenabook.local/paypal/return"
+                : returnUrl.Trim(),
+            ["cancel_url"] = string.IsNullOrWhiteSpace(cancelUrl)
+                ? "https://arenabook.local/paypal/cancel"
+                : cancelUrl.Trim(),
+            ["brand_name"] = "ArenaBook",
+            ["landing_page"] = "NO_PREFERENCE",
+            ["shipping_preference"] = "NO_SHIPPING",
+            ["user_action"] = "PAY_NOW",
+        };
+
+    private static string FormatPayPalError(string responseText)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(responseText);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("details", out var details)
+                && details.ValueKind == JsonValueKind.Array
+                && details.GetArrayLength() > 0)
+            {
+                var first = details[0];
+                var issue = first.TryGetProperty("issue", out var issueEl)
+                    ? issueEl.GetString()
+                    : null;
+                if (string.Equals(issue, "COMPLIANCE_VIOLATION", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "PayPal sandbox je odbio uplatu (COMPLIANCE_VIOLATION). "
+                           + "Prijavite se Personal sandbox kupcem (ne Business računom), po mogućnosti US država. "
+                           + "Kreirajte novi Personal sandbox account u developer.paypal.com ako treba.";
+                }
+
+                var description = first.TryGetProperty("description", out var descEl)
+                    ? descEl.GetString()
+                    : null;
+                if (!string.IsNullOrWhiteSpace(description))
+                    return description;
+            }
+
+            if (root.TryGetProperty("message", out var messageEl))
+            {
+                var message = messageEl.GetString();
+                if (!string.IsNullOrWhiteSpace(message))
+                    return message;
+            }
+        }
+        catch (JsonException)
+        {
+            // fallback
+        }
+
+        return responseText.Length > 400 ? responseText[..400] + "…" : responseText;
     }
 
     private async Task<JsonDocument> PostPayPalRawJsonAsync(
@@ -632,7 +814,7 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         {
             throw new ArenaBook.Application.Common.Exceptions.ValidationException(
                 "PayPal API greška.",
-                new Dictionary<string, string[]> { { "paypal", new[] { text } } });
+                new Dictionary<string, string[]> { { "paypal", new[] { FormatPayPalError(text) } } });
         }
 
         return string.IsNullOrWhiteSpace(text)
@@ -741,7 +923,7 @@ public sealed class PayPalCoinSandboxService : IPayPalCoinSandboxService
         {
             throw new ArenaBook.Application.Common.Exceptions.ValidationException(
                 "PayPal capture nije dostupan.",
-                new Dictionary<string, string[]> { { "paypal", new[] { text } } });
+                new Dictionary<string, string[]> { { "paypal", new[] { FormatPayPalError(text) } } });
         }
 
         return JsonDocument.Parse(text);

@@ -121,6 +121,33 @@ U Development okruženju demo podatke je moguće ponovo učitati: `POST /api/dev
 
 ---
 
+## Testiranje plaćanja (sandbox)
+
+U mobilnoj aplikaciji prijavite se demo igračem (`amir.hadzic@arena.local`), otvorite tab **Novčići** i odaberite način plaćanja. API ključevi za Stripe i PayPal nalaze se u `.env` (`.env-tajne.zip`).
+
+### Stripe — testna kartica
+
+| Polje | Vrijednost |
+|-------|------------|
+| Broj kartice | `4242 4242 4242 4242` |
+| Datum isteka | bilo koji budući datum (npr. `12/34`) |
+| CVC | bilo koji troznamenkasti broj (npr. `123`) |
+
+Uključite opciju **Kartica (Stripe)** i platite preko PaymentSheet-a. Za lokalni `flutter run` proslijedite i `STRIPE_PUBLISHABLE_KEY` iz `.env` (`pk_test_...`).
+
+### PayPal — sandbox kupac
+
+Nakon odabira **PayPal (sandbox)** aplikacija otvara PayPal stranicu u pregledniku. Prijavite se **Personal sandbox** računom (ne ArenaBook e-mailom):
+
+| Polje | Vrijednost |
+|-------|------------|
+| E-mail | `sb-cexay51083863@personal.example.com` |
+| Lozinka | `k'u-0nQU` |
+
+Nakon odobrenja uplate vratite se u aplikaciju (deep link `arenabook://paypal/return`); novčići se dodaju nakon capture-a na API-ju.
+
+---
+
 ## Izdanje aplikacija (GitHub Releases)
 
 Gotovi buildovi za predaju nalaze se na kartici **Releases** ovog repozitorija:

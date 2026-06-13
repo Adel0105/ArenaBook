@@ -3,6 +3,7 @@ import 'package:arena_book_mobile/models/coin_models.dart';
 import 'package:arena_book_mobile/services/api_error.dart';
 import 'package:arena_book_mobile/services/arena_book_api.dart';
 import 'package:arena_book_mobile/services/paypal_checkout_handler.dart';
+import 'package:arena_book_mobile/services/stripe_bootstrap.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -27,8 +28,7 @@ class MobilePaymentService {
       );
     }
 
-    Stripe.publishableKey = publishableKey;
-    await Stripe.instance.applySettings();
+    await StripeBootstrap.ensureReady(publishableKey);
 
     await Stripe.instance.initPaymentSheet(
       paymentSheetParameters: SetupPaymentSheetParameters(

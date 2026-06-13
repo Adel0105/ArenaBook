@@ -403,8 +403,8 @@ class _CoinsScreenState extends State<CoinsScreen> with WidgetsBindingObserver {
                         leading: Icon(Icons.info_outline),
                         title: Text('PayPal sandbox'),
                         subtitle: Text(
-                          'Otvara se PayPal za odobrenje. Nakon potvrde '
-                          'vraćate se u aplikaciju (deep link).',
+                          'Otvara se PayPal sandbox (USD). Prijavite se Personal sandbox '
+                          'kupcem (ne Business). Nakon potvrde vraćate se u aplikaciju.',
                         ),
                       ),
                     CheckboxListTile(
