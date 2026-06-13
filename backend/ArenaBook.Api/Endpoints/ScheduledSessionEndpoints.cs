@@ -95,11 +95,16 @@ public static class ScheduledSessionEndpoints
     }
 
     private static Task<ScheduledSessionDetailsResponse> GetByIdAsync(
+        ClaimsPrincipal user,
         IScheduledSessionService service,
         int id,
         CancellationToken cancellationToken)
     {
-        return service.GetByIdAsync(id, cancellationToken);
+        return service.GetByIdAsync(
+            id,
+            RequireUserId(user),
+            IsAdministrator(user),
+            cancellationToken);
     }
 
     private static Task<SessionJoinCoinQuoteResponse> GetJoinCoinQuoteAsync(
@@ -128,7 +133,7 @@ public static class ScheduledSessionEndpoints
         var organizerId = IsAdministrator(user) && !string.IsNullOrWhiteSpace(body.OrganizerUserId)
             ? body.OrganizerUserId!.Trim()
             : RequireUserId(user);
-        return service.CreateAsync(body, organizerId, cancellationToken);
+        return service.CreateAsync(body, organizerId, IsAdministrator(user), cancellationToken);
     }
 
     private static Task<ScheduledSessionDetailsResponse> UpdateAsync(

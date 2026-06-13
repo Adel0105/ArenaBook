@@ -11,6 +11,7 @@ public sealed class ApplicationUserConfiguration : IEntityTypeConfiguration<Appl
         builder.Property(x => x.FirstName).HasMaxLength(120).IsRequired();
         builder.Property(x => x.LastName).HasMaxLength(120).IsRequired();
         builder.Property(x => x.ProfileImageUrl).HasMaxLength(2048);
+        builder.Property(x => x.CreatedUtc).IsRequired();
         builder.HasOne(x => x.City)
             .WithMany()
             .HasForeignKey(x => x.CityId)

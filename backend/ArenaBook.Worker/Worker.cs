@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using ArenaBook.Application.Abstractions.Messaging;
 using ArenaBook.Application.Options;
 using ArenaBook.Domain.Entities;
 using ArenaBook.Domain.Messaging;
@@ -18,16 +19,19 @@ public sealed class Worker : BackgroundService
     private readonly ILogger<Worker> _logger;
     private readonly RabbitMqOptions _options;
     private readonly IDbContextFactory<ArenaBookDbContext> _dbFactory;
+    private readonly IEmailSender _emailSender;
     private int _connectAttempt;
 
     public Worker(
         ILogger<Worker> logger,
         IOptions<RabbitMqOptions> options,
-        IDbContextFactory<ArenaBookDbContext> dbFactory)
+        IDbContextFactory<ArenaBookDbContext> dbFactory,
+        IEmailSender emailSender)
     {
         _logger = logger;
         _options = options.Value;
         _dbFactory = dbFactory;
+        _emailSender = emailSender;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -122,9 +126,20 @@ public sealed class Worker : BackgroundService
             return;
 
         var kind = kindEl.GetString();
-        if (!string.Equals(kind, RabbitMessageKinds.UserNotification, StringComparison.Ordinal))
+        if (string.Equals(kind, RabbitMessageKinds.UserNotification, StringComparison.Ordinal))
+        {
+            await HandleUserNotificationAsync(root, cancellationToken);
             return;
+        }
 
+        if (string.Equals(kind, RabbitMessageKinds.PasswordResetEmail, StringComparison.Ordinal))
+        {
+            await HandlePasswordResetEmailAsync(root, cancellationToken);
+        }
+    }
+
+    private async Task HandleUserNotificationAsync(JsonElement root, CancellationToken cancellationToken)
+    {
         if (!root.TryGetProperty("userId", out var userIdEl))
             return;
         var userId = userIdEl.GetString();
@@ -147,6 +162,43 @@ public sealed class Worker : BackgroundService
         });
         await db.SaveChangesAsync(cancellationToken);
         _logger.LogInformation("Persisted user_notification for user {UserId}", userId);
+    }
+
+    private async Task HandlePasswordResetEmailAsync(JsonElement root, CancellationToken cancellationToken)
+    {
+        if (!root.TryGetProperty("email", out var emailEl))
+            return;
+        var email = emailEl.GetString();
+        if (string.IsNullOrWhiteSpace(email))
+            return;
+
+        if (!root.TryGetProperty("token", out var tokenEl))
+            return;
+        var token = tokenEl.GetString();
+        if (string.IsNullOrWhiteSpace(token))
+            return;
+
+        if (!_emailSender.IsConfigured)
+        {
+            _logger.LogError("Password reset email for {Email} skipped: SMTP is not configured", email);
+            return;
+        }
+
+        var subject = "ArenaBook — reset lozinke";
+        var body = $"""
+            Poštovani,
+
+            Primili ste zahtjev za reset lozinke u aplikaciji ArenaBook.
+
+            Otvorite ekran „Reset lozinke“ u mobilnoj aplikaciji i unesite token:
+
+            {token}
+
+            Ako niste zatražili reset, zanemarite ovu poruku.
+            """;
+
+        await _emailSender.SendAsync(email, subject, body, cancellationToken);
+        _logger.LogInformation("Sent password reset email to {Email}", email);
     }
 }
 

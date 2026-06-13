@@ -16,5 +16,7 @@ public sealed class ApplicationUser : IdentityUser
     public City? City { get; set; }
 
     public string? ProfileImageUrl { get; set; }
+
+    public DateTime CreatedUtc { get; set; }
 }
 

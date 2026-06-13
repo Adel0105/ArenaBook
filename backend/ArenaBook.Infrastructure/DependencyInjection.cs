@@ -68,17 +68,7 @@ public static class DependencyInjection
                 };
                 options.Events = new JwtBearerEvents
                 {
-                    OnTokenValidated = async context =>
-                    {
-                        var jti = context.Principal?.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
-                        if (string.IsNullOrEmpty(jti))
-                            return;
-
-                        var revocation = context.HttpContext.RequestServices
-                            .GetRequiredService<IJwtTokenRevocationService>();
-                        if (await revocation.IsRevokedAsync(jti, context.HttpContext.RequestAborted))
-                            context.Fail("Token je opozvan.");
-                    },
+                    OnTokenValidated = JwtAccessTokenValidator.ValidateAsync,
                 };
             });
 
@@ -127,7 +117,10 @@ public static class DependencyInjection
         services.Configure<StripeOptions>(configuration.GetSection(StripeOptions.SectionName));
         services.Configure<PayPalOptions>(configuration.GetSection(PayPalOptions.SectionName));
         services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
+        services.Configure<SmtpOptions>(configuration.GetSection(SmtpOptions.SectionName));
         services.AddSingleton<IRabbitMqEventPublisher, RabbitMqEventPublisher>();
+        services.AddSingleton<IEmailSender, SmtpEmailSender>();
+        services.AddSingleton<IPasswordResetDispatchService, RabbitMqPasswordResetDispatchService>();
         services.AddHttpClient(
             "paypal",
             (sp, client) =>
@@ -140,6 +133,7 @@ public static class DependencyInjection
         services.AddScoped<IStripeCoinSandboxService, StripeCoinSandboxService>();
         services.AddScoped<IPayPalCoinSandboxService, PayPalCoinSandboxService>();
         services.AddScoped<IPlayerNotificationService, PlayerNotificationService>();
+        services.AddScoped<IUserNotificationPublisher, UserNotificationPublisher>();
 
         return services;
     }

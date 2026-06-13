@@ -9,7 +9,7 @@ public interface IPayPalCoinSandboxService
         CreatePayPalCoinOrderRequest request,
         CancellationToken cancellationToken = default);
 
-    Task CaptureCoinPurchaseOrderAsync(
+    Task<CoinPurchaseResultResponse> CaptureCoinPurchaseOrderAsync(
         string userId,
         CapturePayPalOrderRequest request,
         CancellationToken cancellationToken = default);

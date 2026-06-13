@@ -1,17 +1,55 @@
+import 'dart:async';
+
+import 'package:app_links/app_links.dart';
 import 'package:arena_book_mobile/core/app_theme.dart';
 import 'package:arena_book_mobile/core/auth_storage.dart';
 import 'package:arena_book_mobile/models/current_user.dart';
 import 'package:arena_book_mobile/screens/login_screen.dart';
 import 'package:arena_book_mobile/screens/player_shell.dart';
 import 'package:arena_book_mobile/services/arena_book_api.dart';
+import 'package:arena_book_mobile/services/paypal_checkout_handler.dart';
+import 'package:arena_book_mobile/services/stripe_bootstrap.dart';
 import 'package:flutter/material.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await StripeBootstrap.initialize();
   runApp(const ArenaBookMobileApp());
 }
 
-class ArenaBookMobileApp extends StatelessWidget {
+class ArenaBookMobileApp extends StatefulWidget {
   const ArenaBookMobileApp({super.key});
+
+  @override
+  State<ArenaBookMobileApp> createState() => _ArenaBookMobileAppState();
+}
+
+class _ArenaBookMobileAppState extends State<ArenaBookMobileApp> {
+  final AppLinks _appLinks = AppLinks();
+  StreamSubscription<Uri>? _linkSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _initDeepLinks();
+  }
+
+  Future<void> _initDeepLinks() async {
+    final initial = await _appLinks.getInitialLink();
+    if (initial != null) {
+      PayPalCheckoutHandler.instance.handleUri(initial);
+    }
+    _linkSub = _appLinks.uriLinkStream.listen(
+      PayPalCheckoutHandler.instance.handleUri,
+      onError: (_) {},
+    );
+  }
+
+  @override
+  void dispose() {
+    _linkSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

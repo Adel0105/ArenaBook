@@ -68,6 +68,13 @@ services:
       PayPal__ClientSecret: ${PAYPAL_CLIENT_SECRET:-}
       PayPal__BaseApiUrl: ${PAYPAL_BASE_API_URL:-https://api-m.sandbox.paypal.com}
       PayPal__WebhookId: ${PAYPAL_WEBHOOK_ID:-}
+      Smtp__Host: ${SMTP_HOST:-}
+      Smtp__Port: ${SMTP_PORT:-587}
+      Smtp__UserName: ${SMTP_USER:-}
+      Smtp__Password: ${SMTP_PASSWORD:-}
+      Smtp__FromAddress: ${SMTP_FROM_ADDRESS:-noreply@arenabook.local}
+      Smtp__FromDisplayName: ${SMTP_FROM_NAME:-ArenaBook}
+      Smtp__EnableSsl: ${SMTP_ENABLE_SSL:-true}
     depends_on:
       sqlserver:
         condition: service_healthy
@@ -87,6 +94,13 @@ services:
       RabbitMQ__UserName: ${RABBITMQ_USER:-arena}
       RabbitMQ__Password: ${RABBITMQ_PASS:-change_me_strong}
       RabbitMQ__VirtualHost: ${RABBITMQ_VHOST:-/}
+      Smtp__Host: ${SMTP_HOST:-}
+      Smtp__Port: ${SMTP_PORT:-587}
+      Smtp__UserName: ${SMTP_USER:-}
+      Smtp__Password: ${SMTP_PASSWORD:-}
+      Smtp__FromAddress: ${SMTP_FROM_ADDRESS:-noreply@arenabook.local}
+      Smtp__FromDisplayName: ${SMTP_FROM_NAME:-ArenaBook}
+      Smtp__EnableSsl: ${SMTP_ENABLE_SSL:-true}
     depends_on:
       sqlserver:
         condition: service_healthy

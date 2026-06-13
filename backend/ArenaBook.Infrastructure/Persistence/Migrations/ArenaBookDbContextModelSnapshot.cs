@@ -394,9 +394,11 @@ namespace ArenaBook.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("ScheduledSessionId");
 
-                    b.HasIndex("UserId");
-
                     b.HasIndex("HallId", "UserId");
+
+                    b.HasIndex("UserId", "ScheduledSessionId")
+                        .IsUnique()
+                        .HasFilter("[ScheduledSessionId] IS NOT NULL");
 
                     b.ToTable("HallReviews", null, t =>
                         {
@@ -569,6 +571,14 @@ namespace ArenaBook.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(450)
                         .HasColumnType("nvarchar(450)");
+
+                    b.Property<decimal>("PricePerParticipantCoins")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal>("PriceTotalCoins")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
 
                     b.Property<int>("SessionKindId")
                         .HasColumnType("int");
@@ -876,6 +886,9 @@ namespace ArenaBook.Infrastructure.Persistence.Migrations
                     b.Property<string>("ConcurrencyStamp")
                         .IsConcurrencyToken()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("CreatedUtc")
+                        .HasColumnType("datetime2");
 
                     b.Property<DateOnly?>("DateOfBirth")
                         .HasColumnType("date");

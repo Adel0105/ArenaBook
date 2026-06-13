@@ -1,4 +1,5 @@
 using ArenaBook.Application.Abstractions;
+using ArenaBook.Application.Sessions;
 using ArenaBook.Domain;
 using ArenaBook.Domain.Entities;
 using ArenaBook.Domain.Security;
@@ -341,6 +342,7 @@ public sealed class DemoDataSeedService : IDemoDataSeedService
                 LastName = last,
                 CityId = cityId,
                 DateOfBirth = dob,
+                CreatedUtc = DateTime.UtcNow.AddDays(-(30 + i * 12)),
             };
 
             var result = await _userManager.CreateAsync(user, password);
@@ -444,6 +446,8 @@ public sealed class DemoDataSeedService : IDemoDataSeedService
                 _ => 2,
             };
             var kindId = rng.Next(100) < 80 ? 1 : 2;
+            var end = start.AddHours(2);
+            var totalPrice = SessionPricing.ComputeTotalPrice(hall.PricePerHourCoins, start, end);
 
             var session = new ScheduledSession
             {
@@ -452,7 +456,9 @@ public sealed class DemoDataSeedService : IDemoDataSeedService
                 SessionKindId = kindId,
                 SessionLifecycleStatusId = statusId,
                 StartUtc = start,
-                EndUtc = start.AddHours(2),
+                EndUtc = end,
+                PriceTotalCoins = totalPrice,
+                PricePerParticipantCoins = SessionPricing.ComputeParticipantJoinPrice(totalPrice),
                 MaxParticipants = 8 + rng.Next(0, 14),
                 MaxAgeYears = kindId == 1 ? 18 + rng.Next(0, 15) : null,
                 InviteCode = kindId == 2 ? $"INV-{hall.Id}-{n:D4}" : null,
@@ -533,12 +539,35 @@ public sealed class DemoDataSeedService : IDemoDataSeedService
 
         if (currentReviews < targetReviews)
         {
-            var halls = await _db.Halls.OrderBy(h => h.Id).Take(40).ToListAsync(ct);
-            var users = await _userManager.GetUsersInRoleAsync(ApplicationRoles.Member);
-            users = users.Concat(await _userManager.GetUsersInRoleAsync(ApplicationRoles.Organizer))
-                .DistinctBy(u => u.Id)
+            var completedId = await _db.SessionLifecycleStatuses.AsNoTracking()
+                .Where(s => s.Code == "COMPLETED")
+                .Select(s => s.Id)
+                .FirstAsync(ct);
+
+            var reviewableSessions = await _db.ScheduledSessions.AsNoTracking()
+                .Where(s => s.SessionLifecycleStatusId == completedId)
+                .Select(s => new { s.Id, s.HallId })
+                .ToListAsync(ct);
+
+            var participants = await _db.ScheduledSessionParticipants.AsNoTracking()
+                .Select(p => new { p.ScheduledSessionId, p.UserId })
+                .ToListAsync(ct);
+
+            var existingSessionReviews = (await _db.HallReviews.AsNoTracking()
+                .Where(r => r.ScheduledSessionId != null)
+                .Select(r => new { SessionId = r.ScheduledSessionId!.Value, r.UserId })
+                .ToListAsync(ct))
+                .Select(x => (x.SessionId, x.UserId))
+                .ToHashSet();
+
+            var candidates = (
+                from session in reviewableSessions
+                join participant in participants on session.Id equals participant.ScheduledSessionId
+                where !existingSessionReviews.Contains((session.Id, participant.UserId))
+                select new { session.Id, session.HallId, participant.UserId })
                 .ToList();
-            if (halls.Count > 0 && users.Count > 0)
+
+            if (candidates.Count > 0)
             {
                 var rng = new Random(424242);
                 var comments = new[]
@@ -552,24 +581,17 @@ public sealed class DemoDataSeedService : IDemoDataSeedService
                     "Prostor je dovoljno velik za našu ekipu.",
                 };
 
-                var existingPairs = (await _db.HallReviews
-                    .Select(r => new { r.HallId, r.UserId })
-                    .ToListAsync(ct))
-                    .Select(x => (x.HallId, x.UserId))
-                    .ToHashSet();
-
                 var toCreate = targetReviews - currentReviews;
-                for (var i = 0; i < toCreate; i++)
+                for (var i = 0; i < toCreate && candidates.Count > 0; i++)
                 {
-                    var hall = halls[rng.Next(halls.Count)];
-                    var user = users[rng.Next(users.Count)];
-                    if (!existingPairs.Add((hall.Id, user.Id)))
-                        continue;
+                    var pick = candidates[rng.Next(candidates.Count)];
+                    candidates.Remove(pick);
 
                     _db.HallReviews.Add(new HallReview
                     {
-                        HallId = hall.Id,
-                        UserId = user.Id,
+                        HallId = pick.HallId,
+                        UserId = pick.UserId,
+                        ScheduledSessionId = pick.Id,
                         RatingStars = (byte)(3 + rng.Next(0, 3)),
                         Comment = comments[rng.Next(comments.Length)],
                         CreatedUtc = DateTime.UtcNow.AddDays(-rng.Next(1, 90)),

@@ -385,7 +385,7 @@ class ArenaBookApi {
     }
   }
 
-  Future<void> cancelSession(int id, {String? reason}) async {
+  Future<void> cancelSession(int id, {required String reason}) async {
     final res = await _client.post(
       _uri('/api/sessions/$id/cancel'),
       headers: _headers(jsonBody: true),

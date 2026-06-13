@@ -14,6 +14,8 @@ public sealed class ScheduledSessionConfiguration : IEntityTypeConfiguration<Sch
         builder.Property(x => x.OrganizerUserId).HasMaxLength(450).IsRequired();
         builder.Property(x => x.StartUtc).IsRequired();
         builder.Property(x => x.EndUtc).IsRequired();
+        builder.Property(x => x.PriceTotalCoins).HasPrecision(18, 2).IsRequired();
+        builder.Property(x => x.PricePerParticipantCoins).HasPrecision(18, 2).IsRequired();
         builder.Property(x => x.InviteCode).HasMaxLength(32);
         builder.Property(x => x.CreatedUtc).IsRequired();
         builder.HasOne(x => x.Hall)

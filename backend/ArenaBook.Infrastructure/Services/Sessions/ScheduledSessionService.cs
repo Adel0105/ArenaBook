@@ -1,18 +1,22 @@
 using ArenaBook.Application.Abstractions;
+using ArenaBook.Application.Abstractions.Notifications;
 using ArenaBook.Application.Abstractions.Sessions;
 using ArenaBook.Application.Common.Exceptions;
+using ArenaBook.Application.Sessions;
 using BusinessRuleException = ArenaBook.Application.Common.Exceptions.ValidationException;
 using ArenaBook.Application.Common.Paging;
 using ArenaBook.Application.Contracts.Sessions;
 using System.Text.Json;
 using ArenaBook.Domain;
 using ArenaBook.Domain.Entities;
+using ArenaBook.Domain.Security;
 using ArenaBook.Infrastructure.Identity;
 using ArenaBook.Infrastructure.Persistence;
 using ArenaBook.Infrastructure.Validation;
 using FluentValidation;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Cryptography;
 
 namespace ArenaBook.Infrastructure.Services.Sessions;
 
@@ -20,28 +24,35 @@ public sealed class ScheduledSessionService : IScheduledSessionService
 {
     private const string MaxParticipantsKey = "Platform.Session.MaxParticipantsPerSession";
     private const string MinSessionPriceKey = "Platform.Session.MinSessionPriceCoins";
+    private const string AdminDeleteReason = "Administrator je obrisao termin.";
 
     private readonly ArenaBookDbContext _db;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ISessionOrganizerRoleService _organizerRoleService;
+    private readonly IUserNotificationPublisher _notifications;
     private readonly IValidator<CreateScheduledSessionRequest> _createValidator;
     private readonly IValidator<UpdateScheduledSessionRequest> _updateValidator;
     private readonly IValidator<JoinScheduledSessionRequest> _joinValidator;
+    private readonly IValidator<CancelScheduledSessionRequest> _cancelValidator;
 
     public ScheduledSessionService(
         ArenaBookDbContext db,
         UserManager<ApplicationUser> userManager,
         ISessionOrganizerRoleService organizerRoleService,
+        IUserNotificationPublisher notifications,
         IValidator<CreateScheduledSessionRequest> createValidator,
         IValidator<UpdateScheduledSessionRequest> updateValidator,
-        IValidator<JoinScheduledSessionRequest> joinValidator)
+        IValidator<JoinScheduledSessionRequest> joinValidator,
+        IValidator<CancelScheduledSessionRequest> cancelValidator)
     {
         _db = db;
         _userManager = userManager;
         _organizerRoleService = organizerRoleService;
+        _notifications = notifications;
         _createValidator = createValidator;
         _updateValidator = updateValidator;
         _joinValidator = joinValidator;
+        _cancelValidator = cancelValidator;
     }
 
     public async Task<PagedListResponse<ScheduledSessionListItemResponse>> GetPagedAsync(
@@ -91,8 +102,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 s.EndUtc,
                 s.MaxParticipants,
                 s.MaxAgeYears,
-                s.InviteCode,
-                PricePerHour = s.Hall.PricePerHourCoins,
+                s.PriceTotalCoins,
+                s.PricePerParticipantCoins,
                 ParticipantCount = s.Participants.Count,
             });
 
@@ -105,29 +116,25 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             .Select(u => new { u.Id, u.Email })
             .ToDictionaryAsync(x => x.Id, x => x.Email, cancellationToken);
 
-        var items = rows.Select(r =>
+        var items = rows.Select(r => new ScheduledSessionListItemResponse
         {
-            var hours = (decimal)(r.EndUtc - r.StartUtc).TotalHours;
-            var price = hours > 0 ? Math.Round(r.PricePerHour * hours, 2) : 0;
-            return new ScheduledSessionListItemResponse
-            {
-                Id = r.Id,
-                HallId = r.HallId,
-                HallName = r.HallName,
-                OrganizerUserId = r.OrganizerUserId,
-                OrganizerEmail = emails.GetValueOrDefault(r.OrganizerUserId),
-                SessionKindId = r.SessionKindId,
-                SessionKindCode = r.KindCode,
-                SessionLifecycleStatusId = r.SessionLifecycleStatusId,
-                SessionLifecycleCode = r.StatusCode,
-                StartUtc = r.StartUtc,
-                EndUtc = r.EndUtc,
-                MaxParticipants = r.MaxParticipants,
-                ParticipantCount = r.ParticipantCount,
-                MaxAgeYears = r.MaxAgeYears,
-                InviteCode = r.InviteCode,
-                PriceTotalCoins = price,
-            };
+            Id = r.Id,
+            HallId = r.HallId,
+            HallName = r.HallName,
+            OrganizerUserId = r.OrganizerUserId,
+            OrganizerEmail = emails.GetValueOrDefault(r.OrganizerUserId),
+            SessionKindId = r.SessionKindId,
+            SessionKindCode = r.KindCode,
+            SessionLifecycleStatusId = r.SessionLifecycleStatusId,
+            SessionLifecycleCode = r.StatusCode,
+            StartUtc = r.StartUtc,
+            EndUtc = r.EndUtc,
+            MaxParticipants = r.MaxParticipants,
+            ParticipantCount = r.ParticipantCount,
+            MaxAgeYears = r.MaxAgeYears,
+            InviteCode = null,
+            PriceTotalCoins = r.PriceTotalCoins,
+            PricePerParticipantCoins = r.PricePerParticipantCoins,
         }).ToList();
 
         return new PagedListResponse<ScheduledSessionListItemResponse>
@@ -139,7 +146,11 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         };
     }
 
-    public async Task<ScheduledSessionDetailsResponse> GetByIdAsync(int id, CancellationToken cancellationToken = default)
+    public async Task<ScheduledSessionDetailsResponse> GetByIdAsync(
+        int id,
+        string? viewerUserId,
+        bool isAdministrator,
+        CancellationToken cancellationToken = default)
     {
         var row = await _db.ScheduledSessions.AsNoTracking()
             .Where(s => s.Id == id)
@@ -159,7 +170,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 s.MaxAgeYears,
                 s.InviteCode,
                 s.CreatedUtc,
-                PricePerHour = s.Hall.PricePerHourCoins,
+                s.PriceTotalCoins,
+                s.PricePerParticipantCoins,
             })
             .FirstOrDefaultAsync(cancellationToken);
 
@@ -171,14 +183,23 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             .Select(p => new { p.Id, p.UserId, p.JoinedUtc, p.CoinsPaid, p.IsOrganizer })
             .ToListAsync(cancellationToken);
 
+        var isPricingLocked = participants.Any(p => p.CoinsPaid > 0);
+
         var userIds = participants.Select(p => p.UserId).Distinct().ToList();
+        if (!userIds.Contains(row.OrganizerUserId))
+            userIds.Add(row.OrganizerUserId);
+
         var userEmails = await _db.Users.AsNoTracking()
             .Where(u => userIds.Contains(u.Id))
             .Select(u => new { u.Id, u.Email })
             .ToDictionaryAsync(x => x.Id, x => x.Email, cancellationToken);
 
-        var hours = (decimal)(row.EndUtc - row.StartUtc).TotalHours;
-        var price = hours > 0 ? Math.Round(row.PricePerHour * hours, 2) : 0;
+        var canViewInviteCode = CanViewInviteCode(
+            row.OrganizerUserId,
+            row.InviteCode,
+            viewerUserId,
+            isAdministrator,
+            participants.Select(p => p.UserId));
 
         return new ScheduledSessionDetailsResponse
         {
@@ -195,9 +216,11 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             EndUtc = row.EndUtc,
             MaxParticipants = row.MaxParticipants,
             MaxAgeYears = row.MaxAgeYears,
-            InviteCode = row.InviteCode,
+            InviteCode = canViewInviteCode ? row.InviteCode : null,
             CreatedUtc = row.CreatedUtc,
-            PriceTotalCoins = price,
+            PriceTotalCoins = row.PriceTotalCoins,
+            PricePerParticipantCoins = row.PricePerParticipantCoins,
+            IsPricingLocked = isPricingLocked,
             Participants = participants.Select(p => new ScheduledSessionParticipantResponse
             {
                 Id = p.Id,
@@ -299,11 +322,10 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (session.SessionLifecycleStatusId != confirmedId)
             throw new ConflictException("Cijena u koinima za pridruživanje dostupna je samo za potvrđen termin.");
 
-        var cost = ComputePrice(session.Hall.PricePerHourCoins, session.StartUtc, session.EndUtc);
         return new SessionJoinCoinQuoteResponse
         {
             ScheduledSessionId = sessionId,
-            CoinsRequired = cost,
+            CoinsRequired = session.PricePerParticipantCoins,
             CurrencyCode = "COIN",
         };
     }
@@ -311,11 +333,15 @@ public sealed class ScheduledSessionService : IScheduledSessionService
     public async Task<ScheduledSessionDetailsResponse> CreateAsync(
         CreateScheduledSessionRequest request,
         string organizerUserId,
+        bool isAdministrator,
         CancellationToken cancellationToken = default)
     {
         var validation = await _createValidator.ValidateAsync(request, cancellationToken);
         if (!validation.IsValid)
             throw new ArenaBook.Application.Common.Exceptions.ValidationException("Validacija nije prošla.", validation.ToErrorDictionary());
+
+        EnforceSchedulingPolicy(request.StartUtc, request.EndUtc, isAdministrator);
+        await ValidateOrganizerUserAsync(organizerUserId, cancellationToken);
 
         var kind = await _db.SessionKinds.AsNoTracking().FirstOrDefaultAsync(k => k.Id == request.SessionKindId, cancellationToken);
         if (kind is null)
@@ -337,12 +363,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (request.MaxParticipants > Math.Min(hall.CapacityPeople, platformMax))
             throw new BusinessRuleException("Maksimalan broj učesnika premašuje kapacitet dvorane ili platformski limit.", Err());
 
-        var totalPrice = ComputePrice(hall.PricePerHourCoins, request.StartUtc, request.EndUtc);
+        var totalPrice = SessionPricing.ComputeTotalPrice(hall.PricePerHourCoins, request.StartUtc, request.EndUtc);
         if (totalPrice < minPrice)
             throw new BusinessRuleException($"Ukupna cijena termina mora biti najmanje {minPrice} koina.", Err());
 
         if (await HasOverlapAsync(request.HallId, request.StartUtc, request.EndUtc, null, cancellationToken))
             throw new ConflictException("Termin se preklapa s drugim aktivnim terminom u istoj dvorani.");
+
+        var participantPrice = SessionPricing.ComputeParticipantJoinPrice(totalPrice);
 
         string? invite = null;
         if (kind.Code == "INVITE")
@@ -362,26 +390,27 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             SessionLifecycleStatusId = pendingId,
             StartUtc = request.StartUtc,
             EndUtc = request.EndUtc,
+            PriceTotalCoins = totalPrice,
+            PricePerParticipantCoins = participantPrice,
             MaxParticipants = request.MaxParticipants,
             MaxAgeYears = kind.Code == "PUBLIC" ? request.MaxAgeYears : null,
             InviteCode = invite,
             CreatedUtc = DateTime.UtcNow,
         };
 
-        _db.ScheduledSessions.Add(entity);
-        await _db.SaveChangesAsync(cancellationToken);
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
 
+        _db.ScheduledSessions.Add(entity);
         _db.ScheduledSessionParticipants.Add(new ScheduledSessionParticipant
         {
-            ScheduledSessionId = entity.Id,
+            ScheduledSession = entity,
             UserId = organizerUserId,
             JoinedUtc = DateTime.UtcNow,
             CoinsPaid = 0,
             IsOrganizer = true,
         });
-        await _db.SaveChangesAsync(cancellationToken);
 
-        await _organizerRoleService.EnsureOrganizerRoleForUserAsync(organizerUserId, cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
 
         AppendAudit(
             entity.Id,
@@ -398,10 +427,19 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 request.MaxParticipants,
                 request.MaxAgeYears,
                 HasInviteCode = !string.IsNullOrEmpty(invite),
+                totalPrice,
+                participantPrice,
             }));
-        await _db.SaveChangesAsync(cancellationToken);
 
-        return await GetByIdAsync(entity.Id, cancellationToken);
+        await _organizerRoleService.EnsureOrganizerRoleForUserAsync(organizerUserId, cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+
+        await _notifications.TryPublishManyAsync(
+            [SessionNotificationBuilder.SessionCreated(organizerUserId, hall.Name, entity.StartUtc)],
+            cancellationToken);
+
+        return await GetByIdAsync(entity.Id, organizerUserId, isAdministrator, cancellationToken);
     }
 
     public async Task<ScheduledSessionDetailsResponse> UpdateAsync(
@@ -414,6 +452,8 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         var validation = await _updateValidator.ValidateAsync(request, cancellationToken);
         if (!validation.IsValid)
             throw new ArenaBook.Application.Common.Exceptions.ValidationException("Validacija nije prošla.", validation.ToErrorDictionary());
+
+        EnforceSchedulingPolicy(request.StartUtc, request.EndUtc, isAdministrator);
 
         var entity = await _db.ScheduledSessions
             .Include(s => s.Hall)
@@ -429,6 +469,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (entity.SessionLifecycleStatusId == cancelledId || entity.SessionLifecycleStatusId == completedId)
             throw new ConflictException("Termin je završen ili otkazan i ne može se mijenjati.");
 
+        var hasPaidParticipants = await HasPaidParticipantsAsync(id, cancellationToken);
+        if (hasPaidParticipants
+            && (entity.StartUtc != request.StartUtc || entity.EndUtc != request.EndUtc))
+        {
+            throw new ConflictException(
+                "Vrijeme termina ne može se mijenjati nakon što su učesnici platili pridruživanje.");
+        }
+
         var kind = await _db.SessionKinds.AsNoTracking().FirstAsync(k => k.Id == entity.SessionKindId, cancellationToken);
         var platformMax = await GetPlatformIntAsync(MaxParticipantsKey, 22, cancellationToken);
         if (request.MaxParticipants > Math.Min(entity.Hall.CapacityPeople, platformMax))
@@ -438,10 +486,20 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (request.MaxParticipants < participantCount)
             throw new ConflictException("Maksimalan broj učesnika ne sme biti manji od trenutnog broja prijavljenih.");
 
-        var minPrice = await GetPlatformDecimalAsync(MinSessionPriceKey, 0, cancellationToken);
-        var totalPrice = ComputePrice(entity.Hall.PricePerHourCoins, request.StartUtc, request.EndUtc);
-        if (totalPrice < minPrice)
-            throw new BusinessRuleException($"Ukupna cijena termina mora biti najmanje {minPrice} koina.", Err());
+        decimal? newTotalPrice = null;
+        decimal? newParticipantPrice = null;
+        if (!hasPaidParticipants)
+        {
+            var minPrice = await GetPlatformDecimalAsync(MinSessionPriceKey, 0, cancellationToken);
+            newTotalPrice = SessionPricing.ComputeTotalPrice(
+                entity.Hall.PricePerHourCoins,
+                request.StartUtc,
+                request.EndUtc);
+            if (newTotalPrice < minPrice)
+                throw new BusinessRuleException($"Ukupna cijena termina mora biti najmanje {minPrice} koina.", Err());
+
+            newParticipantPrice = SessionPricing.ComputeParticipantJoinPrice(newTotalPrice.Value);
+        }
 
         if (await HasOverlapAsync(entity.HallId, request.StartUtc, request.EndUtc, id, cancellationToken))
             throw new ConflictException("Termin se preklapa s drugim aktivnim terminom u istoj dvorani.");
@@ -450,6 +508,11 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         entity.EndUtc = request.EndUtc;
         entity.MaxParticipants = request.MaxParticipants;
         entity.MaxAgeYears = kind.Code == "PUBLIC" ? request.MaxAgeYears : null;
+        if (newTotalPrice is not null && newParticipantPrice is not null)
+        {
+            entity.PriceTotalCoins = newTotalPrice.Value;
+            entity.PricePerParticipantCoins = newParticipantPrice.Value;
+        }
 
         AppendAudit(
             id,
@@ -463,9 +526,12 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 request.EndUtc,
                 request.MaxParticipants,
                 request.MaxAgeYears,
+                priceTotalCoins = entity.PriceTotalCoins,
+                pricePerParticipantCoins = entity.PricePerParticipantCoins,
+                pricingLocked = hasPaidParticipants,
             }));
         await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, cancellationToken);
+        return await GetByIdAsync(id, userId, isAdministrator, cancellationToken);
     }
 
     public async Task<ScheduledSessionDetailsResponse> ConfirmAsync(
@@ -480,16 +546,15 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (!isAdministrator && entity.OrganizerUserId != userId)
             throw new BusinessRuleException("Nemate pravo potvrde ovog termina.", Err());
 
-        var pendingId = await LifecycleIdAsync("PENDING", cancellationToken);
-        var confirmedId = await LifecycleIdAsync("CONFIRMED", cancellationToken);
-        if (entity.SessionLifecycleStatusId != pendingId)
-            throw new ConflictException("Samo termin na čekanju može biti potvrđen.");
-
-        var prev = entity.SessionLifecycleStatusId;
-        entity.SessionLifecycleStatusId = confirmedId;
-        AppendAudit(id, userId, ScheduledSessionAuditActions.Confirmed, prev, confirmedId, null);
-        await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, cancellationToken);
+        return await ApplyLifecycleTransitionAsync(
+            entity,
+            id,
+            userId,
+            isAdministrator,
+            ScheduledSessionLifecycleAction.Confirm,
+            ScheduledSessionAuditActions.Confirmed,
+            cancelReason: null,
+            cancellationToken);
     }
 
     public async Task<ScheduledSessionDetailsResponse> CancelAsync(
@@ -499,19 +564,29 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         bool isAdministrator,
         CancellationToken cancellationToken = default)
     {
+        var validation = await _cancelValidator.ValidateAsync(request, cancellationToken);
+        if (!validation.IsValid)
+        {
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "Validacija nije prošla.",
+                validation.ToErrorDictionary());
+        }
+
         var entity = await _db.ScheduledSessions.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
         if (entity is null)
             throw new NotFoundException("Termin nije pronađen.");
         if (!isAdministrator && entity.OrganizerUserId != userId)
             throw new BusinessRuleException("Nemate pravo otkazivanja ovog termina.", Err());
 
-        var reason = string.IsNullOrWhiteSpace(request.Reason) ? null : request.Reason.Trim();
-        return await TransitionToCancelledAsync(
+        var reason = request.Reason.Trim();
+        return await ApplyLifecycleTransitionAsync(
             entity,
             id,
             userId,
+            isAdministrator,
+            ScheduledSessionLifecycleAction.Cancel,
             ScheduledSessionAuditActions.Cancelled,
-            reason,
+            cancelReason: reason,
             cancellationToken);
     }
 
@@ -527,16 +602,15 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (!isAdministrator && entity.OrganizerUserId != userId)
             throw new BusinessRuleException("Nemate pravo završetka ovog termina.", Err());
 
-        var confirmedId = await LifecycleIdAsync("CONFIRMED", cancellationToken);
-        var completedId = await LifecycleIdAsync("COMPLETED", cancellationToken);
-        if (entity.SessionLifecycleStatusId != confirmedId)
-            throw new ConflictException("Samo potvrđen termin može biti označen kao završen.");
-
-        var prev = entity.SessionLifecycleStatusId;
-        entity.SessionLifecycleStatusId = completedId;
-        AppendAudit(id, userId, ScheduledSessionAuditActions.Completed, prev, completedId, null);
-        await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, cancellationToken);
+        return await ApplyLifecycleTransitionAsync(
+            entity,
+            id,
+            userId,
+            isAdministrator,
+            ScheduledSessionLifecycleAction.Complete,
+            ScheduledSessionAuditActions.Completed,
+            cancelReason: null,
+            cancellationToken);
     }
 
     public async Task DeleteAsync(int id, string actorUserId, CancellationToken cancellationToken = default)
@@ -545,12 +619,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (entity is null)
             throw new NotFoundException("Termin nije pronađen.");
 
-        await TransitionToCancelledAsync(
+        await ApplyLifecycleTransitionAsync(
             entity,
             id,
             actorUserId,
+            isAdministrator: true,
+            ScheduledSessionLifecycleAction.AdminDelete,
             ScheduledSessionAuditActions.Deleted,
-            null,
+            cancelReason: AdminDeleteReason,
             cancellationToken);
     }
 
@@ -604,7 +680,10 @@ public sealed class ScheduledSessionService : IScheduledSessionService
         if (count >= session.MaxParticipants)
             throw new ConflictException("Termin je popunjen.");
 
-        var cost = ComputePrice(session.Hall.PricePerHourCoins, session.StartUtc, session.EndUtc);
+        var cost = session.PricePerParticipantCoins;
+
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
+
         var wallet = await _db.UserCoinWallets
             .FirstOrDefaultAsync(w => w.UserId == userId, cancellationToken);
         if (wallet is null)
@@ -616,7 +695,6 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 UpdatedUtc = DateTime.UtcNow,
             };
             _db.UserCoinWallets.Add(wallet);
-            await _db.SaveChangesAsync(cancellationToken);
         }
 
         if (wallet.BalanceCoins < cost)
@@ -649,47 +727,201 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             null,
             null,
             SerializeDetails(new { participantUserId = userId, coinsPaid = cost }));
+
         await _db.SaveChangesAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+
+        var joinMessages = new List<UserNotificationMessage>
+        {
+            SessionNotificationBuilder.ParticipantJoinedSelf(userId, session.Hall.Name, session.StartUtc),
+        };
+        if (!string.Equals(session.OrganizerUserId, userId, StringComparison.Ordinal))
+        {
+            joinMessages.Add(SessionNotificationBuilder.ParticipantJoinedOrganizer(
+                session.OrganizerUserId,
+                session.Hall.Name,
+                session.StartUtc));
+        }
+
+        await _notifications.TryPublishManyAsync(joinMessages, cancellationToken);
     }
 
-    private async Task<ScheduledSessionDetailsResponse> TransitionToCancelledAsync(
+    private async Task<ScheduledSessionDetailsResponse> ApplyLifecycleTransitionAsync(
         ScheduledSession entity,
-        int id,
+        int sessionId,
         string actorUserId,
+        bool isAdministrator,
+        ScheduledSessionLifecycleAction action,
         string auditAction,
         string? cancelReason,
         CancellationToken cancellationToken)
     {
-        var cancelledId = await LifecycleIdAsync("CANCELLED", cancellationToken);
-        var completedId = await LifecycleIdAsync("COMPLETED", cancellationToken);
-        if (entity.SessionLifecycleStatusId == cancelledId || entity.SessionLifecycleStatusId == completedId)
-            throw new ConflictException("Termin je već završen ili otkazan.");
+        var fromCode = await LifecycleCodeByIdAsync(entity.SessionLifecycleStatusId, cancellationToken);
+        var plan = ScheduledSessionLifecycleStateMachine.Plan(
+            fromCode,
+            action,
+            entity.EndUtc,
+            DateTime.UtcNow,
+            cancelReason);
 
+        var targetId = await LifecycleIdAsync(plan.TargetStatusCode, cancellationToken);
         var prev = entity.SessionLifecycleStatusId;
-        await RefundParticipantsAsync(id, cancellationToken);
+        var notificationContext = await LoadSessionNotificationContextAsync(sessionId, cancellationToken);
+        var participantUserIds = await GetParticipantUserIdsAsync(sessionId, cancellationToken);
 
-        entity.SessionLifecycleStatusId = cancelledId;
-        AppendAudit(
-            id,
-            actorUserId,
-            auditAction,
-            prev,
-            cancelledId,
-            SerializeDetails(new { refundsProcessed = true, cancelReason }));
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
+
+        IReadOnlyList<(string UserId, decimal Amount)> refunds = Array.Empty<(string, decimal)>();
+        if (plan.RefundParticipants)
+            refunds = await RefundParticipantsAsync(sessionId, cancellationToken);
+
+        entity.SessionLifecycleStatusId = targetId;
+
+        string? auditJson = null;
+        if (action is ScheduledSessionLifecycleAction.Cancel or ScheduledSessionLifecycleAction.AdminDelete)
+        {
+            auditJson = SerializeDetails(new
+            {
+                refundsProcessed = plan.RefundParticipants,
+                cancelReason = cancelReason?.Trim(),
+            });
+        }
+
+        AppendAudit(sessionId, actorUserId, auditAction, prev, targetId, auditJson);
         await _db.SaveChangesAsync(cancellationToken);
-        return await GetByIdAsync(id, cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+
+        if (notificationContext is not null)
+        {
+            await PublishLifecycleNotificationsAsync(
+                action,
+                notificationContext,
+                participantUserIds,
+                cancelReason,
+                refunds,
+                cancellationToken);
+        }
+
+        return await GetByIdAsync(sessionId, actorUserId, isAdministrator, cancellationToken);
     }
 
-    private async Task RefundParticipantsAsync(int sessionId, CancellationToken cancellationToken)
+    private async Task PublishLifecycleNotificationsAsync(
+        ScheduledSessionLifecycleAction action,
+        SessionNotificationContext context,
+        IReadOnlyList<string> participantUserIds,
+        string? cancelReason,
+        IReadOnlyList<(string UserId, decimal Amount)> refunds,
+        CancellationToken cancellationToken)
+    {
+        var messages = new List<UserNotificationMessage>();
+
+        switch (action)
+        {
+            case ScheduledSessionLifecycleAction.Confirm:
+                foreach (var userId in participantUserIds)
+                {
+                    messages.Add(SessionNotificationBuilder.SessionConfirmed(
+                        userId,
+                        context.HallName,
+                        context.StartUtc));
+                }
+
+                break;
+
+            case ScheduledSessionLifecycleAction.Cancel:
+                var reason = string.IsNullOrWhiteSpace(cancelReason) ? "Nije naveden." : cancelReason.Trim();
+                foreach (var userId in participantUserIds)
+                {
+                    messages.Add(SessionNotificationBuilder.SessionCancelled(
+                        userId,
+                        context.HallName,
+                        context.StartUtc,
+                        reason));
+                }
+
+                AppendRefundNotifications(messages, context.HallName, refunds);
+                break;
+
+            case ScheduledSessionLifecycleAction.AdminDelete:
+                var deleteReason = string.IsNullOrWhiteSpace(cancelReason) ? "Nije naveden." : cancelReason.Trim();
+                foreach (var userId in participantUserIds)
+                {
+                    messages.Add(SessionNotificationBuilder.SessionDeleted(
+                        userId,
+                        context.HallName,
+                        context.StartUtc,
+                        deleteReason));
+                }
+
+                AppendRefundNotifications(messages, context.HallName, refunds);
+                break;
+
+            case ScheduledSessionLifecycleAction.Complete:
+                foreach (var userId in participantUserIds)
+                {
+                    messages.Add(SessionNotificationBuilder.SessionCompleted(
+                        userId,
+                        context.HallName,
+                        context.StartUtc));
+                }
+
+                break;
+        }
+
+        if (messages.Count > 0)
+            await _notifications.TryPublishManyAsync(messages, cancellationToken);
+    }
+
+    private static void AppendRefundNotifications(
+        List<UserNotificationMessage> messages,
+        string hallName,
+        IReadOnlyList<(string UserId, decimal Amount)> refunds)
+    {
+        foreach (var (userId, amount) in refunds)
+        {
+            messages.Add(SessionNotificationBuilder.SessionRefund(userId, hallName, amount));
+        }
+    }
+
+    private async Task<SessionNotificationContext?> LoadSessionNotificationContextAsync(
+        int sessionId,
+        CancellationToken cancellationToken)
+    {
+        return await _db.ScheduledSessions.AsNoTracking()
+            .Where(s => s.Id == sessionId)
+            .Select(s => new SessionNotificationContext(s.Id, s.Hall.Name, s.StartUtc, s.OrganizerUserId))
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    private Task<List<string>> GetParticipantUserIdsAsync(int sessionId, CancellationToken cancellationToken) =>
+        _db.ScheduledSessionParticipants.AsNoTracking()
+            .Where(p => p.ScheduledSessionId == sessionId)
+            .Select(p => p.UserId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+    private async Task<IReadOnlyList<(string UserId, decimal Amount)>> RefundParticipantsAsync(
+        int sessionId,
+        CancellationToken cancellationToken)
     {
         var participants = await _db.ScheduledSessionParticipants
             .Where(p => p.ScheduledSessionId == sessionId && p.CoinsPaid > 0)
             .ToListAsync(cancellationToken);
 
+        if (participants.Count == 0)
+            return Array.Empty<(string, decimal)>();
+
+        var participantUserIds = participants.Select(p => p.UserId).Distinct().ToList();
+        var wallets = await _db.UserCoinWallets
+            .Where(w => participantUserIds.Contains(w.UserId))
+            .ToListAsync(cancellationToken);
+        var walletByUserId = wallets.ToDictionary(w => w.UserId);
+
+        var refunds = new List<(string UserId, decimal Amount)>();
+
         foreach (var p in participants)
         {
-            var wallet = await _db.UserCoinWallets.FirstOrDefaultAsync(w => w.UserId == p.UserId, cancellationToken);
-            if (wallet is null)
+            if (!walletByUserId.TryGetValue(p.UserId, out var wallet))
                 continue;
 
             var amount = p.CoinsPaid;
@@ -704,15 +936,74 @@ public sealed class ScheduledSessionService : IScheduledSessionService
                 CreatedUtc = DateTime.UtcNow,
             });
             p.CoinsPaid = 0;
+            refunds.Add((p.UserId, amount));
+        }
+
+        return refunds;
+    }
+
+    private sealed record SessionNotificationContext(
+        int SessionId,
+        string HallName,
+        DateTime StartUtc,
+        string OrganizerUserId);
+
+    private Task<bool> HasPaidParticipantsAsync(int sessionId, CancellationToken cancellationToken) =>
+        _db.ScheduledSessionParticipants.AnyAsync(
+            p => p.ScheduledSessionId == sessionId && p.CoinsPaid > 0,
+            cancellationToken);
+
+    private async Task ValidateOrganizerUserAsync(string organizerUserId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(organizerUserId))
+        {
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "Validacija nije prošla.",
+                new Dictionary<string, string[]>
+                {
+                    ["organizerUserId"] = ["Organizator nije pronađen."],
+                });
+        }
+
+        var user = await _userManager.FindByIdAsync(organizerUserId);
+        if (user is null)
+            throw new NotFoundException("Organizator nije pronađen.");
+
+        if (await _userManager.IsLockedOutAsync(user))
+        {
+            throw new BusinessRuleException(
+                "Organizator nije aktivan.",
+                new Dictionary<string, string[]> { ["organizerUserId"] = ["Organizator nije aktivan."] });
+        }
+
+        var roles = await _userManager.GetRolesAsync(user);
+        var canOrganize = roles.Contains(ApplicationRoles.Member)
+            || roles.Contains(ApplicationRoles.Organizer)
+            || roles.Contains(ApplicationRoles.Administrator);
+        if (!canOrganize)
+        {
+            throw new BusinessRuleException(
+                "Organizator mora imati ulogu Member, Organizer ili Administrator.",
+                new Dictionary<string, string[]>
+                {
+                    ["organizerUserId"] = ["Organizator mora imati ulogu Member, Organizer ili Administrator."],
+                });
         }
     }
 
-    private static decimal ComputePrice(decimal pricePerHour, DateTime start, DateTime end)
+    private static void EnforceSchedulingPolicy(DateTime startUtc, DateTime endUtc, bool isAdministrator)
     {
-        var hours = (decimal)(end - start).TotalHours;
-        if (hours <= 0)
-            return 0;
-        return Math.Round(pricePerHour * hours, 2);
+        var errors = SessionTimeRules.ValidateSchedulingPolicy(
+            startUtc,
+            endUtc,
+            allowHistoricalTimes: isAdministrator,
+            DateTime.UtcNow);
+        if (errors.Count > 0)
+        {
+            throw new ArenaBook.Application.Common.Exceptions.ValidationException(
+                "Validacija vremena termina nije prošla.",
+                errors.ToDictionary(kv => kv.Key, kv => kv.Value));
+        }
     }
 
     private static int GetAgeAt(DateOnly birth, DateTime atUtc)
@@ -752,6 +1043,14 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             .FirstAsync(cancellationToken);
     }
 
+    private async Task<string> LifecycleCodeByIdAsync(int statusId, CancellationToken cancellationToken)
+    {
+        return await _db.SessionLifecycleStatuses.AsNoTracking()
+            .Where(x => x.Id == statusId)
+            .Select(x => x.Code)
+            .FirstAsync(cancellationToken);
+    }
+
     private async Task<int> GetPlatformIntAsync(string key, int fallback, CancellationToken cancellationToken)
     {
         var v = await _db.PlatformSettingEntries.AsNoTracking()
@@ -772,11 +1071,38 @@ public sealed class ScheduledSessionService : IScheduledSessionService
             : fallback;
     }
 
+    private static bool CanViewInviteCode(
+        string organizerUserId,
+        string? inviteCode,
+        string? viewerUserId,
+        bool isAdministrator,
+        IEnumerable<string> participantUserIds)
+    {
+        if (string.IsNullOrEmpty(inviteCode))
+            return false;
+
+        if (isAdministrator)
+            return true;
+
+        if (string.IsNullOrEmpty(viewerUserId))
+            return false;
+
+        if (organizerUserId == viewerUserId)
+            return true;
+
+        return participantUserIds.Contains(viewerUserId);
+    }
+
     private static string GenerateInviteCode()
     {
         const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-        var rnd = Random.Shared;
-        return new string(Enumerable.Range(0, 8).Select(_ => chars[rnd.Next(chars.Length)]).ToArray());
+        Span<char> code = stackalloc char[8];
+        Span<byte> randomBytes = stackalloc byte[8];
+        RandomNumberGenerator.Fill(randomBytes);
+        for (var i = 0; i < code.Length; i++)
+            code[i] = chars[randomBytes[i] % chars.Length];
+
+        return new string(code);
     }
 
     private static IReadOnlyDictionary<string, string[]> Err()

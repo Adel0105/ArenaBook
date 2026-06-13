@@ -13,5 +13,7 @@ public sealed class CreateCoinPurchaseIntentResponse
     public string Currency { get; set; } = string.Empty;
 
     public decimal CoinsToPurchase { get; set; }
+
+    public string PublishableKey { get; set; } = string.Empty;
 }
 

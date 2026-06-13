@@ -2,93 +2,114 @@
 
 ## Cilj
 
-Sistem preporuke predlaže igračima **dvorane** i **termine** u njihovom gradu na osnovu **agregiranog angažmana** zajednice: recenzija (zvjezdice), komentara i lajkova/dislajkova na dvorane. Svaka stavka uključuje **objašnjenje** (`Explanation`) pogodno za prikaz u mobilnoj aplikaciji.
+Sistem preporuke predlaže igračima **dvorane** i **termine** u odabranom gradu koristeći **user-based collaborative filtering (CF)** nad poviješću ponašanja zajednice: rezervacija termina, recenzija (zvjezdice) i lajkova/dislajkova na dvorane. Svaka stavka uključuje **objašnjenje** (`Explanation`) pogodno za prikaz u mobilnoj aplikaciji.
 
-Algoritam **nije** klasični user-based collaborative filtering (nema matrice korisnik–dvorana niti kosinusne sličnosti između korisnika). Rangiranje je **globalno po gradu** — isti skor za sve korisnike iz istog grada, filtrirano prema gradu iz profila korisnika.
+## Tip algoritma — user-based collaborative filtering
 
-> Implementacija je u klasi `CollaborativeFilteringRecommendationService` (historijski naziv servisa); logika u kodu je **engagement scoring**.
+### Matrica korisnik–dvorana
 
-## Tip algoritma — bodovanje angažmana
+Za svaki par (korisnik, dvorana) u gradu gradi se **preferenca** (skala ~1–5) iz najjačeg dostupnog signala:
 
-Za svaku aktivnu dvoranu u odabranom gradu računaju se agregati iz baze, zatim **engagement score**:
+| Signal | Izvor | Težina preferencije |
+|--------|--------|---------------------|
+| Recenzija | `HallReviews.RatingStars` | 1–5 (direktno) |
+| Lajk | `HallReactions` (`IsLike = true`) | **5** |
+| Dislajk | `HallReactions` (`IsLike = false`) | **1** |
+| Rezervacija / sudjelovanje | `ScheduledSessionParticipants` → dvorana termina | **4** |
 
-| Signal | Izvor | Bod po jedinici |
-|--------|--------|-----------------|
-| Lajk | `HallReactions` (`IsLike = true`) | **+10** |
-| Dislajk | `HallReactions` (`IsLike = false`) | **−10** |
-| Zvjezdice | `HallReviews.RatingStars` (suma 1–5) | **+1** po zvjezdici |
-| Komentar | `HallReviews` s ne-praznim `Comment` | **+1** po komentaru |
+Ako korisnik ima više signala za istu dvoranu, uzima se **maksimum** (najjači signal).
 
-**Formula:**
+### Sličnost korisnika
+
+Između aktivnog korisnika i ostalih korisnika računa se **kosinusna sličnost** nad vektorima preferencija (user–item matrica). U susjedstvo ulazi do **15** najsličnijih korisnika (prag sličnosti ≥ 0,05).
+
+### Predviđanje ocjene dvorane
+
+Za dvorane koje korisnik još nije ocijenio / rezervisao / reagirao:
 
 ```
-score = (lajkovi × 10) + (dislajkovi × −10) + (suma_zvjezdica × 1) + (broj_komentara × 1)
+predviđena_ocjena(h) = Σ sim(u,v) × pref(v,h) / Σ sim(u,v)
 ```
 
-Dvorane se sortiraju **opadajuće** po `score`, zatim po broju recenzija, zatim po nazivu.
+gdje je suma preko susjeda `v` koji imaju preferenciju za dvoranu `h`.
 
-Prosječna ocjena (`AverageRating`) u odgovoru je informativna: `suma_zvjezdica / broj_recenzija` (0 ako nema recenzija).
+### Hibridni finalni skor
+
+Finalni skor spaja CF predviđanje i **popularnost u gradu** (engagement score zajednice):
+
+```
+final = w × CF_pred + (1 − w) × popularnost_norm
+```
+
+Težina `w` raste s brojem sličnih korisnika (0,25–0,85). Ako korisnik nema povijest ili nema susjeda, koristi se samo popularnost (cold start).
+
+### Popularnost u gradu (fallback / blend)
+
+Za normalizaciju popularnosti koristi se engagement score po dvorani:
+
+| Signal | Bod po jedinici |
+|--------|-----------------|
+| Lajk | **+10** |
+| Dislajk | **−10** |
+| Zvjezdice (suma) | **+1** |
+| Komentar | **+1** |
+
+Popularnost se skalira na raspon 0–5 unutar grada.
 
 ## Implementacija u backendu
 
 | Komponenta | Putanja |
 |------------|---------|
-| Servis | `backend/ArenaBook.Infrastructure/Services/Recommendations/CollaborativeFilteringRecommendationService.cs` |
+| CF engine | `CollaborativeFilteringEngine.cs` |
+| Servis | `CollaborativeFilteringRecommendationService.cs` |
 | API — dvorane | `GET /api/me/recommendations/halls?cityId=&limit=` |
 | API — termini | `GET /api/me/recommendations/sessions?cityId=&limit=` |
-| Ugovori | `RecommendedHallResponse`, `RecommendedSessionResponse` |
 
 ### Odabir grada
 
-1. Ako korisnik ima `CityId` u profilu → koristi se taj grad.
-2. Inače, opcionalni query parametar `cityId`.
-3. Ako grad nije poznat → prazna lista (mobilna aplikacija traži postavljanje grada u profilu).
+1. Ako je poslan query parametar **`cityId`** i grad postoji → **koristi se taj grad** (prioritet nad profilom).
+2. Inače grad iz profila korisnika (`Users.CityId`).
+3. Ako grad nije poznat → prazna lista.
 
 ### Preporučene dvorane
 
-- Učitavaju se sve **aktivne** dvorane u gradu s agregatima recenzija i reakcija.
-- Za svaku dvoranu izračunava se `score` i generira se `Explanation`, npr.:
-  *„Dvorana u gradu Sarajevo. Bodovi: 42 (👍 2×10, 👎 0×-10, ★ 12×1, 💬 2×1).“*
+- Aktivne dvorane u odabranom gradu.
+- CF predviđanje + hibrid s popularnošću.
+- Sortiranje: opadajuće po `Score`, zatim broj recenzija, zatim naziv.
 
 ### Preporučeni termini
 
-- Uzimaju se budući termini u statusu **CONFIRMED** u istom gradu, u dvoranama koje korisnik **još nije** rezervisao.
-- Skor termina = engagement score **dvorane** u kojoj se termin održava.
-- Sortiranje: opadajuće po skoru dvorane, zatim rastuće po vremenu početka.
-- Ako dvorana nema bodova, objašnjenje i dalje opisuje termin bez naglašavanja visokog skora.
+- Budući **CONFIRMED** termini u gradu, u dvoranama koje korisnik **još nije** rezervisao.
+- Skor termina = hibridni CF skor **dvorane**.
+- Sortiranje: opadajuće po skoru, zatim rastuće po vremenu početka.
 
 ## Ulazni podaci
 
-| Tablica | Polja / značenje |
-|---------|------------------|
-| `HallReviews` | `RatingStars` (1–5), opcionalni `Comment` |
-| `HallReactions` | `IsLike` (lajk / dislajk), vezano na korisnika i dvoranu |
-| `Halls` | `CityId`, `IsActive`, cijena |
-| `ScheduledSessions` | budući CONFIRMED termini |
-| `ScheduledSessionParticipants` | isključuju već rezervisane termine |
+| Tablica | Značenje u CF |
+|---------|----------------|
+| `HallReviews` | Direktna ocjena dvorane |
+| `HallReactions` | Lajk / dislajk |
+| `ScheduledSessionParticipants` | Implicitna pozitivna povratna informacija (igrao u dvorani) |
+| `Halls` | Filtar po gradu, `IsActive` |
+| `ScheduledSessions` | Budući termini za preporuku |
 | `Users` | `CityId` profila |
-
-Demo seed (`DemoDataSeedService`) puni recenzije i lajkove radi realističnih preporuka pri testiranju.
 
 ## Izlaz u mobilnoj aplikaciji
 
 | Mjesto | Ponašanje |
 |--------|-----------|
 | Početni ekran | Sekcije **Preporučeno za vas** (do 5 dvorana) i preporučeni termini (do 5) |
-| Ekran **Preporuke** | Puna lista dvorana i termina s `Explanation` po stavci |
-| Tekst u UI | *„Rangirano po ocjenama, komentarima i lajkovima.“* |
-
-API pozivi: `GET /api/me/recommendations/halls` i `GET /api/me/recommendations/sessions` (parametar `limit`).
+| Ekran **Preporuke** | Puna lista s `Explanation` po stavci |
+| API | `cityId` opcionalno — ima prioritet nad gradom u profilu |
 
 ## Ograničenja
 
-- Nema personalizacije po **povijesti pojedinačnog korisnika** — samo grad iz profila i globalni angažman dvorana u tom gradu.
-- Prazan rezultat ako korisnik nema grad u profilu i ne pošalje `cityId`.
-- Dislajkovi snižavaju score; dvorana bez aktivnosti ima score 0.
+- CF zahtijeva dovoljno preklapanja u ponašanju korisnika; na malom broju korisnika dominira popularnost.
+- Sličnost se računa unutar interakcija vezanih za dvorane u odabranom gradu.
+- Prazan rezultat ako nije poznat grad (ni parametar ni profil).
 
-## Moguća poboljšanja (izvan trenutnog opsega)
+## Moguća poboljšanja
 
-- User-based ili item-based collaborative filtering (matrica korisnik–dvorana).
-- Personalizacija prema vlastitim rezervacijama i recenzijama korisnika.
-- Hibrid s content-based filtrima (oprema dvorane, udaljenost, cijena).
-- Keširanje rang-listi po gradu i invalidacija nakon nove recenzije ili reakcije.
+- Item-based CF ili matrix factorization.
+- Keširanje matrice preferencija po gradu.
+- Dodatni signali (cijena, oprema, udaljenost).

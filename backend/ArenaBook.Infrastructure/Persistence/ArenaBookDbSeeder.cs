@@ -133,6 +133,7 @@ public static class ArenaBookDbSeeder
             LastName = lastName,
             CityId = cityId,
             DateOfBirth = dateOfBirth,
+            CreatedUtc = DateTime.UtcNow,
         };
 
         var result = await userManager.CreateAsync(user, password);

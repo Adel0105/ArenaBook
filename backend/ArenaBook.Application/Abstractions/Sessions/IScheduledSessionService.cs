@@ -10,7 +10,11 @@ public interface IScheduledSessionService
         ScheduledSessionListQuery query,
         CancellationToken cancellationToken = default);
 
-    Task<ScheduledSessionDetailsResponse> GetByIdAsync(int id, CancellationToken cancellationToken = default);
+    Task<ScheduledSessionDetailsResponse> GetByIdAsync(
+        int id,
+        string? viewerUserId,
+        bool isAdministrator,
+        CancellationToken cancellationToken = default);
 
     Task<SessionJoinCoinQuoteResponse> GetJoinCoinQuoteAsync(int sessionId, CancellationToken cancellationToken = default);
 
@@ -23,6 +27,7 @@ public interface IScheduledSessionService
     Task<ScheduledSessionDetailsResponse> CreateAsync(
         CreateScheduledSessionRequest request,
         string organizerUserId,
+        bool isAdministrator,
         CancellationToken cancellationToken = default);
 
     Task<ScheduledSessionDetailsResponse> UpdateAsync(

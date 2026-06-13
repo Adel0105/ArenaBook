@@ -1,4 +1,5 @@
 using ArenaBook.Application.Abstractions;
+using ArenaBook.Application.Abstractions.Messaging;
 using ArenaBook.Application.Auth;
 using ArenaBook.Application.Contracts.Auth;
 using ArenaBook.Domain.Entities;
@@ -25,6 +26,7 @@ public sealed class AuthService : IAuthService
     private readonly IValidator<ResetPasswordRequest> _resetPasswordValidator;
     private readonly JwtTokenFactory _jwtTokenFactory;
     private readonly IJwtTokenRevocationService _jwtTokenRevocationService;
+    private readonly IPasswordResetDispatchService _passwordResetDispatch;
 
     public AuthService(
         UserManager<ApplicationUser> userManager,
@@ -36,7 +38,8 @@ public sealed class AuthService : IAuthService
         IValidator<ForgotPasswordRequest> forgotPasswordValidator,
         IValidator<ResetPasswordRequest> resetPasswordValidator,
         JwtTokenFactory jwtTokenFactory,
-        IJwtTokenRevocationService jwtTokenRevocationService)
+        IJwtTokenRevocationService jwtTokenRevocationService,
+        IPasswordResetDispatchService passwordResetDispatch)
     {
         _userManager = userManager;
         _db = db;
@@ -48,6 +51,7 @@ public sealed class AuthService : IAuthService
         _resetPasswordValidator = resetPasswordValidator;
         _jwtTokenFactory = jwtTokenFactory;
         _jwtTokenRevocationService = jwtTokenRevocationService;
+        _passwordResetDispatch = passwordResetDispatch;
     }
 
     public async Task<AuthOperationResult> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken = default)
@@ -68,6 +72,7 @@ public sealed class AuthService : IAuthService
             DateOfBirth = request.DateOfBirth,
             CityId = request.CityId,
             EmailConfirmed = true,
+            CreatedUtc = DateTime.UtcNow,
         };
 
         var createResult = await _userManager.CreateAsync(user, request.Password);
@@ -101,6 +106,9 @@ public sealed class AuthService : IAuthService
         var user = await _userManager.FindByEmailAsync(request.Email);
         if (user is null || !await _userManager.CheckPasswordAsync(user, request.Password))
             return AuthOperationResult.Fail(AuthMessages.InvalidCredentials);
+
+        if (await _userManager.IsLockedOutAsync(user))
+            return AuthOperationResult.Fail(AuthMessages.AccountLocked);
 
         var roles = await _userManager.GetRolesAsync(user);
         var tokens = _jwtTokenFactory.CreateTokens(user, roles);
@@ -176,6 +184,8 @@ public sealed class AuthService : IAuthService
     public async Task ChangePasswordAsync(
         string userId,
         ChangePasswordRequest request,
+        string? currentJwtId = null,
+        DateTime? currentTokenExpiresUtc = null,
         CancellationToken cancellationToken = default)
     {
         var validation = await _changePasswordValidator.ValidateAsync(request, cancellationToken);
@@ -193,10 +203,13 @@ public sealed class AuthService : IAuthService
             throw new ArenaBook.Application.Common.Exceptions.ValidationException(
                 "Lozinka nije promijenjena.",
                 result.Errors.GroupBy(e => e.Code).ToDictionary(g => g.Key, g => g.Select(e => e.Description).ToArray()));
+
+        await InvalidateUserAccessTokensAsync(user, currentJwtId, currentTokenExpiresUtc, cancellationToken);
     }
 
-    public async Task<string?> RequestPasswordResetAsync(
+    public async Task<PasswordResetResult> RequestPasswordResetAsync(
         ForgotPasswordRequest request,
+        bool exposeDevelopmentTokenFallback,
         CancellationToken cancellationToken = default)
     {
         var validation = await _forgotPasswordValidator.ValidateAsync(request, cancellationToken);
@@ -207,9 +220,21 @@ public sealed class AuthService : IAuthService
 
         var user = await _userManager.FindByEmailAsync(request.Email);
         if (user is null)
-            return null;
+            return new PasswordResetResult();
 
-        return await _userManager.GeneratePasswordResetTokenAsync(user);
+        var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+
+        if (_passwordResetDispatch.IsAvailable)
+        {
+            await _passwordResetDispatch.DispatchAsync(user.Email!, token, cancellationToken);
+            return new PasswordResetResult { EmailDispatched = true };
+        }
+
+        if (exposeDevelopmentTokenFallback)
+            return new PasswordResetResult { DevelopmentToken = token };
+
+        throw new InvalidOperationException(
+            "Slanje e-maila za reset lozinke nije konfigurirano (RabbitMQ + SMTP).");
     }
 
     public async Task ResetPasswordAsync(ResetPasswordRequest request, CancellationToken cancellationToken = default)
@@ -231,6 +256,8 @@ public sealed class AuthService : IAuthService
             throw new ArenaBook.Application.Common.Exceptions.ValidationException(
                 "Reset nije uspio.",
                 result.Errors.GroupBy(e => e.Code).ToDictionary(g => g.Key, g => g.Select(e => e.Description).ToArray()));
+
+        await InvalidateUserAccessTokensAsync(user, currentJwtId: null, currentTokenExpiresUtc: null, cancellationToken);
     }
 
     public Task LogoutAsync(string? jwtId, DateTime? expiresUtc, CancellationToken cancellationToken = default)
@@ -239,6 +266,16 @@ public sealed class AuthService : IAuthService
             return Task.CompletedTask;
 
         return _jwtTokenRevocationService.RevokeAsync(jwtId, expiresUtc.Value, cancellationToken);
+    }
+
+    private async Task InvalidateUserAccessTokensAsync(
+        ApplicationUser user,
+        string? currentJwtId,
+        DateTime? currentTokenExpiresUtc,
+        CancellationToken cancellationToken)
+    {
+        await _userManager.UpdateSecurityStampAsync(user);
+        await LogoutAsync(currentJwtId, currentTokenExpiresUtc, cancellationToken);
     }
 }
 

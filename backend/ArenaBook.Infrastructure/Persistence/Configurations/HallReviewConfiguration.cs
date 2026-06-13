@@ -29,6 +29,9 @@ public sealed class HallReviewConfiguration : IEntityTypeConfiguration<HallRevie
             .HasForeignKey(x => x.UserId)
             .OnDelete(DeleteBehavior.Restrict);
         builder.HasIndex(x => new { x.HallId, x.UserId });
+        builder.HasIndex(x => new { x.UserId, x.ScheduledSessionId })
+            .IsUnique()
+            .HasFilter("[ScheduledSessionId] IS NOT NULL");
     }
 }
 
